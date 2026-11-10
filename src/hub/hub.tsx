@@ -12,18 +12,21 @@ import { Page } from "azure-devops-ui/Page";
 import { createRestSource } from "./api";
 import { firstOf, pickLang, Strings, STRINGS } from "./i18n";
 import {
-  byType,
   cycleStats,
   DataSource,
   DAY_MS,
+  exportRows,
   formatDays,
+  groupStats,
   hasRole,
   Item,
   leadStats,
   matches,
+  OpenParent,
   PulseData,
   Role,
   ROLES,
+  toCsv,
   toDateInput,
   weekly,
 } from "./logic";
@@ -35,12 +38,13 @@ const DEFAULT_DAYS = 90;
 const OPTION_DELAY_MS = 500;
 const PAGE_SIZE = 100;
 
-type SortKey = "id" | "title" | "type" | "assignee" | "created" | "closed" | "lead" | "cycle" | "children";
+type SortKey = "id" | "title" | "type" | "project" | "assignee" | "created" | "closed" | "lead" | "cycle" | "children";
 
 const SORTERS: Record<SortKey, (i: Item) => string | number> = {
   id: (i) => i.id,
   title: (i) => i.title.toLocaleLowerCase("tr"),
   type: (i) => i.type,
+  project: (i) => i.project,
   assignee: (i) => (i.assignee ?? "").toLocaleLowerCase("tr"),
   created: (i) => i.created,
   closed: (i) => i.closed,
@@ -86,15 +90,16 @@ function WeeklyChart({ items, t }: { items: Item[]; t: Strings }) {
   );
 }
 
-function TypeTable({ items, t }: { items: Item[]; t: Strings }) {
+function GroupTable(props: { items: Item[]; t: Strings; title: string; label: string; group: (i: Item) => string }) {
+  const { items, t } = props;
   const fmt = (d: number) => formatDays(d, t.units, t.locale);
   return (
     <section>
-      <h3 className="dp-h">{t.byTypeTitle}</h3>
+      <h3 className="dp-h">{props.title}</h3>
       <table className="dp-table dp-table-narrow">
         <thead>
           <tr>
-            <th>{t.col.type}</th>
+            <th>{props.label}</th>
             <th className="dp-num">{t.count}</th>
             <th className="dp-num">{t.avg}</th>
             <th className="dp-num">{t.median}</th>
@@ -102,9 +107,9 @@ function TypeTable({ items, t }: { items: Item[]; t: Strings }) {
           </tr>
         </thead>
         <tbody>
-          {byType(items).map((r) => (
-            <tr key={r.type}>
-              <td>{r.type}</td>
+          {groupStats(items, props.group).map((r) => (
+            <tr key={r.name}>
+              <td>{r.name || "—"}</td>
               <td className="dp-num">{r.stats.count}</td>
               <td className="dp-num">{fmt(r.stats.avg)}</td>
               <td className="dp-num">{fmt(r.stats.median)}</td>
@@ -117,6 +122,18 @@ function TypeTable({ items, t }: { items: Item[]; t: Strings }) {
   );
 }
 
+/** Metni dosya olarak indirir. Baştaki BOM, Excel'in Türkçe karakterleri doğru okuması içindir. */
+function download(name: string, text: string) {
+  const url = URL.createObjectURL(new Blob(["\ufeff", text], { type: "text/csv;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function ItemTable({ items, role, t }: { items: Item[]; role: Role; t: Strings }) {
   const [query, setQuery] = React.useState("");
   const [sort, setSort] = React.useState<{ key: SortKey; desc: boolean }>({ key: "lead", desc: true });
@@ -124,7 +141,7 @@ function ItemTable({ items, role, t }: { items: Item[]; role: Role; t: Strings }
   const rows = React.useMemo(() => {
     const get = SORTERS[sort.key];
     return items
-      .filter((i) => matches(query, i.id, i.title, i.assignee))
+      .filter((i) => matches(query, i.id, i.title, i.assignee, i.project))
       .sort((a, b) => {
         const x = get(a);
         const y = get(b);
@@ -160,6 +177,17 @@ function ItemTable({ items, role, t }: { items: Item[]; role: Role; t: Strings }
           }}
         />
         <span className="dp-muted">{t.shown(Math.min(limit, rows.length), rows.length)}</span>
+        <button
+          className="dp-button"
+          disabled={rows.length === 0}
+          onClick={() => {
+            // Yalnızca ekranda görünen ilk sayfa değil, arama ve sıralamadan geçen tüm satırlar aktarılır.
+            const header = [t.col.id, t.col.title, t.col.type, t.state, t.col.project, t.col.assignee, t.col.parent, t.csv.link, t.col.children, t.col.created, t.col.closed, t.csv.leadDays, t.csv.cycleDays];
+            download(`delivery-pulse-${role}-${toDateInput(Date.now())}.csv`, toCsv([header, ...exportRows(rows)], t.csv.separator, t.csv.decimal));
+          }}
+        >
+          {t.exportCsv}
+        </button>
       </div>
       <div className="dp-scroll">
         <table className="dp-table">
@@ -168,6 +196,7 @@ function ItemTable({ items, role, t }: { items: Item[]; role: Role; t: Strings }
               {head("id", t.col.id, true)}
               {head("title", t.col.title)}
               {head("type", t.col.type)}
+              {head("project", t.col.project)}
               {head("assignee", t.col.assignee)}
               {role === "parent" && head("children", t.col.children, true)}
               {role === "child" && <th className="dp-num">{t.col.parent}</th>}
@@ -187,12 +216,19 @@ function ItemTable({ items, role, t }: { items: Item[]; role: Role; t: Strings }
                   </a>
                 </td>
                 <td>{i.type}</td>
+                <td>{i.project || "—"}</td>
                 <td>{i.assignee ?? "—"}</td>
                 {role === "parent" && <td className="dp-num">{i.childCount}</td>}
                 {role === "child" && (
                   <td className="dp-num">
-                    <a className="dp-link" href={i.url.replace(/\d+$/, String(i.parentId))} target="_blank" rel="noopener noreferrer">
-                      {i.parentId}
+                    {i.via && <span className="dp-muted">{t.via[i.via]} </span>}
+                    <a
+                      className="dp-link"
+                      href={i.url.replace(/\d+$/, String(i.parentId ?? i.relatedTo))}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {i.parentId ?? i.relatedTo}
                     </a>
                   </td>
                 )}
@@ -214,6 +250,57 @@ function ItemTable({ items, role, t }: { items: Item[]; role: Role; t: Strings }
   );
 }
 
+function OpenParentTable({ parents, t }: { parents: OpenParent[]; t: Strings }) {
+  const [limit, setLimit] = React.useState(PAGE_SIZE);
+  if (parents.length === 0) return null;
+  const date = (ms: number) => new Date(ms).toLocaleDateString(t.locale);
+  return (
+    <section>
+      <h3 className="dp-h">{t.openParentsTitle(parents.length)}</h3>
+      <div className="dp-muted">{t.openParentsHint}</div>
+      <div className="dp-scroll">
+        <table className="dp-table">
+          <thead>
+            <tr>
+              <th className="dp-num">{t.col.id}</th>
+              <th>{t.col.title}</th>
+              <th>{t.col.type}</th>
+              <th>{t.state}</th>
+              <th>{t.col.assignee}</th>
+              <th className="dp-num">{t.closedChildren}</th>
+              <th className="dp-num">{t.col.created}</th>
+              <th className="dp-num">{t.age}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {parents.slice(0, limit).map((p) => (
+              <tr key={p.id}>
+                <td className="dp-num">{p.id}</td>
+                <td className="dp-title">
+                  <a className="dp-link" href={p.url} target="_blank" rel="noopener noreferrer">
+                    {p.title}
+                  </a>
+                </td>
+                <td>{p.type}</td>
+                <td>{p.state}</td>
+                <td>{p.assignee ?? "—"}</td>
+                <td className="dp-num">{p.closedChildren}</td>
+                <td className="dp-num">{date(p.created)}</td>
+                <td className="dp-num dp-strong">{formatDays(p.ageDays, t.units, t.locale)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {parents.length > limit && (
+        <button className="dp-button" onClick={() => setLimit((l) => l + PAGE_SIZE)}>
+          {t.showMore}
+        </button>
+      )}
+    </section>
+  );
+}
+
 function App({ source, mock, t }: { source: DataSource; mock: boolean; t: Strings }) {
   const [from, setFrom] = React.useState(() => toDateInput(Date.now() - DEFAULT_DAYS * DAY_MS));
   const [to, setTo] = React.useState(() => toDateInput(Date.now()));
@@ -222,6 +309,7 @@ function App({ source, mock, t }: { source: DataSource; mock: boolean; t: String
   const [loading, setLoading] = React.useState(true);
   const [role, setRole] = React.useState<Role>("parent");
   const [type, setType] = React.useState("");
+  const [related, setRelated] = React.useState(true);
   const [reload, setReload] = React.useState(0);
   const first = React.useRef(true);
 
@@ -231,7 +319,7 @@ function App({ source, mock, t }: { source: DataSource; mock: boolean; t: String
       () => {
         setLoading(true);
         source
-          .load({ from, to })
+          .load({ from, to, related })
           .then(
             (d) => {
               if (cancelled) return;
@@ -249,7 +337,7 @@ function App({ source, mock, t }: { source: DataSource; mock: boolean; t: String
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [source, from, to, reload]);
+  }, [source, from, to, related, reload]);
 
   const all = data?.items ?? [];
   const types = React.useMemo(() => [...new Set(all.map((i) => i.type))].sort(), [all]);
@@ -259,6 +347,15 @@ function App({ source, mock, t }: { source: DataSource; mock: boolean; t: String
     [typed],
   );
   const items = groups[role];
+  // Açık parent'ların child'ları tür süzgecinden geçmiş listeden sayılır; child'ı kalmayan gösterilmez.
+  const openParents = React.useMemo(() => {
+    const counts = new Map<number, number>();
+    for (const i of typed) if (i.parentId) counts.set(i.parentId, (counts.get(i.parentId) ?? 0) + 1);
+    return (data?.openParents ?? [])
+      .map((p) => ({ ...p, closedChildren: counts.get(p.id) ?? 0 }))
+      .filter((p) => p.closedChildren > 0);
+  }, [data, typed]);
+  const showOpen = role === "parent" && openParents.length > 0;
   const lead = leadStats(items);
   const cycle = cycleStats(items);
   const fmt = (d?: number) => formatDays(d, t.units, t.locale);
@@ -287,6 +384,10 @@ function App({ source, mock, t }: { source: DataSource; mock: boolean; t: String
                 </option>
               ))}
             </select>
+          </label>
+          <label className="dp-check" title={t.relatedHint}>
+            <input type="checkbox" checked={related} onChange={(e) => setRelated(e.target.checked)} />
+            {t.related}
           </label>
           <button className="dp-button" disabled={loading} onClick={() => setReload((n) => n + 1)}>
             {loading ? t.loading : t.refresh}
@@ -317,6 +418,7 @@ function App({ source, mock, t }: { source: DataSource; mock: boolean; t: String
                     <span className="dp-tab-title">{t.roles[r]}</span>
                     <span className="dp-tab-label">
                       {groups[r].length} · {t.medianShort} {fmt(s?.median)}
+                      {r === "parent" && openParents.length > 0 ? ` · ${t.openCount(openParents.length)}` : ""}
                     </span>
                   </button>
                 );
@@ -324,8 +426,11 @@ function App({ source, mock, t }: { source: DataSource; mock: boolean; t: String
             </div>
             <div className="dp-muted">{t.roleHints[role]}</div>
 
+            {role === "parent" && data.parentsOutOfRange > 0 && (
+              <div className="dp-muted">{t.parentsOutOfRange(data.parentsOutOfRange)}</div>
+            )}
             {items.length === 0 ? (
-              <div className="dp-empty">{t.empty}</div>
+              !showOpen && <div className="dp-empty">{t.empty}</div>
             ) : (
               <>
                 <div className="dp-cards">
@@ -336,11 +441,15 @@ function App({ source, mock, t }: { source: DataSource; mock: boolean; t: String
                   <Card label={t.cycle} value={fmt(cycle?.median)} hint={t.cycleHint} />
                 </div>
                 <WeeklyChart items={items} t={t} />
-                <TypeTable items={items} t={t} />
+                <GroupTable items={items} t={t} title={t.byTypeTitle} label={t.col.type} group={(i) => i.type} />
+                {new Set(items.map((i) => i.project)).size > 1 && (
+                  <GroupTable items={items} t={t} title={t.byProjectTitle} label={t.col.project} group={(i) => i.project} />
+                )}
                 {/* key: sekme değişince arama, sıralama ve sayfa sıfırlanır. */}
                 <ItemTable key={role} items={items} role={role} t={t} />
               </>
             )}
+            {showOpen && <OpenParentTable parents={openParents} t={t} />}
             <div className="dp-muted">{t.closedStates(data.closedStates.join(", "))}</div>
           </>
         )}

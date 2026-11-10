@@ -1,6 +1,6 @@
 {
   "name": "delivery-pulse",
-  "version": "0.1.0",
+  "version": "0.1.8",
   "private": true,
   "description": "Azure DevOps Server 2022 icin work item lead time (acilis-kapanis suresi) panosu",
   "scripts": {

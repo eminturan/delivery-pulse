@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "delivery-pulse",
   "publisher": "turanemin",
-  "version": "0.1.0",
+  "version": "0.1.8",
   "name": "Delivery Pulse",
   "description": "Lead time of work items from creation to closure, measured separately for parents and children.",
   "public": true,
@@ -62,6 +62,98 @@
         "name": "Delivery Pulse",
         "order": 2,
         "uri": "dist/hub/hub.html"
+      }
+    },
+    {
+      "id": "summary-widget",
+      "type": "ms.vss-dashboards-web.widget",
+      "targets": [
+        "ms.vss-dashboards-web.widget-catalog",
+        ".summary-widget-config"
+      ],
+      "properties": {
+        "name": "Delivery Pulse – Summary",
+        "description": "Report by work item type for a date range: opened and closed, still open, opened earlier and closed, plus median lead time.",
+        "catalogIconUrl": "static/icon.png",
+        "previewImageUrl": "static/widget-summary.png",
+        "uri": "dist/summary-widget/summary-widget.html",
+        "supportedSizes": [
+          {
+            "rowSpan": 2,
+            "columnSpan": 2
+          },
+          {
+            "rowSpan": 3,
+            "columnSpan": 2
+          },
+          {
+            "rowSpan": 4,
+            "columnSpan": 2
+          },
+          {
+            "rowSpan": 5,
+            "columnSpan": 2
+          },
+          {
+            "rowSpan": 6,
+            "columnSpan": 2
+          },
+          {
+            "rowSpan": 2,
+            "columnSpan": 3
+          },
+          {
+            "rowSpan": 3,
+            "columnSpan": 3
+          },
+          {
+            "rowSpan": 4,
+            "columnSpan": 3
+          },
+          {
+            "rowSpan": 5,
+            "columnSpan": 3
+          },
+          {
+            "rowSpan": 6,
+            "columnSpan": 3
+          },
+          {
+            "rowSpan": 2,
+            "columnSpan": 4
+          },
+          {
+            "rowSpan": 3,
+            "columnSpan": 4
+          },
+          {
+            "rowSpan": 4,
+            "columnSpan": 4
+          },
+          {
+            "rowSpan": 5,
+            "columnSpan": 4
+          },
+          {
+            "rowSpan": 6,
+            "columnSpan": 4
+          }
+        ],
+        "supportedScopes": [
+          "project_team"
+        ]
+      }
+    },
+    {
+      "id": "summary-widget-config",
+      "type": "ms.vss-dashboards-web.widget-configuration",
+      "targets": [
+        "ms.vss-dashboards-web.widget-configuration"
+      ],
+      "properties": {
+        "name": "Delivery Pulse – Summary configuration",
+        "description": "Date range and link options of the summary widget.",
+        "uri": "dist/summary-config/summary-config.html"
       }
     }
   ],

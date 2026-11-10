@@ -271,3 +271,12 @@ section > .dp-button {
 .dp-link:hover {
   text-decoration: underline;
 }
+
+.dp-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  font-size: 13px;
+  cursor: pointer;
+}

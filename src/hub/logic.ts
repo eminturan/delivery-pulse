@@ -10,12 +10,17 @@ export interface Item {
   title: string;
   type: string;
   state: string;
+  project: string;
   assignee?: string;
   /** Epoch ms. */
   created: number;
   closed: number;
   activated?: number;
   parentId?: number;
+  /** Parent'ı olmayan ama Related ya da Tested By bağlantısıyla ulaşılan kaydın bağlı olduğu kayıt. */
+  relatedTo?: number;
+  /** `relatedTo` bağlantısının türü. */
+  via?: Via;
   /** Kapalı ya da açık, doğrudan bağlı child sayısı. */
   childCount: number;
   /** Açılıştan kapanışa geçen gün. */
@@ -24,6 +29,8 @@ export interface Item {
   cycleDays?: number;
   url: string;
 }
+
+export type Via = "related" | "tested";
 
 /** parent: child'ı olan; child: parent'ı olan; standalone: ikisi de olmayan. Bir kayıt hem parent hem child olabilir. */
 export type Role = "parent" | "child" | "standalone";
@@ -49,10 +56,33 @@ export interface LoadOptions {
   /** YYYY-AA-GG, yerel gün. */
   from: string;
   to: string;
+  /** Related ve Tested By bağlantıları da child bağlantısı gibi izlenir. */
+  related?: boolean;
+  /** Yalnızca rapor widget'ı: sayılacak kart tipleri; boşsa hepsi. */
+  types?: string[];
+}
+
+/** Child'ları aralıkta kapanmış ama kendisi kapalı olmayan parent. */
+export interface OpenParent {
+  id: number;
+  title: string;
+  type: string;
+  state: string;
+  assignee?: string;
+  created: number;
+  /** Açılıştan bugüne geçen gün. */
+  ageDays: number;
+  /** Aralıkta kapanan child sayısı. */
+  closedChildren: number;
+  url: string;
 }
 
 export interface PulseData {
   items: Item[];
+  /** Kapanan child'ların hâlâ açık olan parent'ları (başka projede olabilirler). */
+  openParents: OpenParent[];
+  /** Kapanan child'ların, seçilen aralığın dışında kapanmış parent sayısı. */
+  parentsOutOfRange: number;
   project?: string;
   /** Kapalı sayılan durum adları. */
   closedStates: string[];
@@ -61,13 +91,42 @@ export interface PulseData {
   warnings: string[];
 }
 
+/** Rapor widget'ında bir kart tipinin (ya da toplamın) satırı. */
+export interface ReportRow {
+  type: string;
+  /** Aralıkta açılıp aralıkta kapanan. */
+  openedClosed: number;
+  /** Aralıkta açılan ve aralık sonunda kapanmamış olan. */
+  stillOpen: number;
+  /** Aralıktan önce açılıp aralıkta kapanan. */
+  closedOlder: number;
+  /** Aralıkta kapananların medyan lead time'ı (gün). */
+  median?: number;
+}
+
+export interface ReportData {
+  rows: ReportRow[];
+  total: ReportRow;
+  truncated: boolean;
+  warnings: string[];
+}
+
 export interface DataSource {
   load(opts: LoadOptions): Promise<PulseData>;
+  loadReport(opts: LoadOptions): Promise<ReportData>;
 }
 
 export const DAY_MS = 86_400_000;
-/** Proje durumları okunamazsa kapalı sayılan durumlar. İptal edilen işler teslimat sayılmaz. */
+/** Proje durumları okunamazsa kapalı sayılan durumlar. */
 export const DEFAULT_CLOSED_STATES = ["Closed", "Done", "Completed", "Tamamlandı"];
+/**
+ * Kategorisi ne olursa olsun kapalı sayılan durumlar: iptal edilen işin de süreci bitmiştir.
+ * Sunucunun harf duyarlılığına bağlı kalmamak için yazım biçimleri ayrı ayrı yer alır.
+ */
+export const CANCELLED_STATES = ["İptal", "iptal", "Iptal"];
+
+/** Durum listesine iptal durumlarını ekler (yinelenmeden). */
+export const withCancelled = (states: string[]) => [...new Set([...states, ...CANCELLED_STATES])];
 
 export const withSlash = (url: string) => (url.endsWith("/") ? url : `${url}/`);
 
@@ -115,15 +174,113 @@ const quote = (s: string) => `'${s.replace(/'/g, "''")}'`;
  * bağlı kalmaz); saat dilimi farkı için iki uçta birer gün pay bırakılır, kesin süzme tarayıcıdadır.
  * Kapanış anı olarak StateChangeDate kullanılır: ClosedDate özel durum adlarında dolmayabilir.
  */
-function closedClause(prefix: string, states: string[], opts: LoadOptions, now: number, project?: string): string {
-  const f = (name: string) => `${prefix}[${name}]`;
-  const parts = [`${f("System.State")} IN (${states.map(quote).join(", ")})`];
-  if (project) parts.unshift(`${f("System.TeamProject")} = ${quote(project)}`);
+const STATE_CHANGE = "Microsoft.VSTS.Common.StateChangeDate";
+
+function rangeParts(prefix: string, opts: LoadOptions, now: number, name = STATE_CHANGE): string[] {
+  const field = `${prefix}[${name}]`;
+  const parts: string[] = [];
   const fromAgo = daysAgo(opts.from, now);
   const toAgo = daysAgo(opts.to, now);
-  if (!Number.isNaN(fromAgo)) parts.push(`${f("Microsoft.VSTS.Common.StateChangeDate")} >= @Today - ${fromAgo + 1}`);
-  if (!Number.isNaN(toAgo) && toAgo > 1) parts.push(`${f("Microsoft.VSTS.Common.StateChangeDate")} <= @Today - ${toAgo - 1}`);
+  if (!Number.isNaN(fromAgo)) parts.push(`${field} >= @Today - ${fromAgo + 1}`);
+  if (!Number.isNaN(toAgo) && toAgo > 1) parts.push(`${field} <= @Today - ${toAgo - 1}`);
+  return parts;
+}
+
+function closedClause(prefix: string, states: string[], opts: LoadOptions, now: number, project?: string): string {
+  const f = (name: string) => `${prefix}[${name}]`;
+  const parts = [`${f("System.State")} IN (${states.map(quote).join(", ")})`, ...rangeParts(prefix, opts, now)];
+  if (project) parts.unshift(`${f("System.TeamProject")} = ${quote(project)}`);
   return parts.join(" AND ");
+}
+
+const HIERARCHY = "System.LinkTypes.Hierarchy-Forward";
+
+export type DateMatch = "state" | "created" | "either";
+
+/** Aralık koşulu; "either" için açılışı ya da durum değişimi aralıkta olanlar. Aralık geçersizse boş. */
+function dateClause(prefix: string, opts: LoadOptions, now: number, match: DateMatch): string[] {
+  const state = rangeParts(prefix, opts, now);
+  const created = rangeParts(prefix, opts, now, "System.CreatedDate");
+  if (match === "state") return state;
+  if (match === "created") return created;
+  return state.length ? [`((${created.join(" AND ")}) OR (${state.join(" AND ")}))`] : [];
+}
+
+/** Bağlantının çıktığı kayıtlar: bir projenin tüm kayıtları ya da belirli id'ler (alt seviyelere inerken). */
+export type LinkSource = { project: string } | { ids: number[] };
+
+/**
+ * Kaynağa bağlı olan ve aralıkta durumu değişen kayıtlar; hangi projede olurlarsa olsunlar.
+ * Hedef projelerin kapalı durum adları farklı olabildiği için durum burada süzülmez, kayıtlar
+ * okunduktan sonra kendi projelerinin durumlarına göre ayıklanır.
+ * @param related true ise bağlantı türü süzülmez (yanıt `toLinks` ile ayıklanır): Related ve Tested By'ın
+ *                WIQL'deki adları sunucuya göre değişebildiği için tür adı sorguya yazılmaz.
+ */
+export function childLinksWiql(
+  opts: LoadOptions,
+  now: number,
+  source: LinkSource,
+  related = false,
+  /** Hedefin hangi tarihi aralığa düşmeli: durum değişimi, açılış ya da ikisinden biri. */
+  match: DateMatch = "state",
+): string {
+  const from =
+    "project" in source
+      ? `Source.[System.TeamProject] = ${quote(source.project)}`
+      : `Source.[System.Id] IN (${source.ids.join(", ")})`;
+  const parts = [from, ...dateClause("Target.", opts, now, match)];
+  if (!related) parts.push(`[System.Links.LinkType] = '${HIERARCHY}'`);
+  return `SELECT [System.Id] FROM WorkItemLinks WHERE ${parts.join(" AND ")} MODE (MustContain)`;
+}
+
+export interface Link {
+  source: number;
+  target: number;
+  kind: "child" | Via;
+}
+
+/**
+ * Link sorgusu yanıtından parent→child bağlantıları ve (istenirse) Related ile Tested By bağlantıları;
+ * diğer türler atılır. Tested By yalnızca işten teste doğru izlenir (testten işe "Tests" yönü alınmaz).
+ */
+export function toLinks(relations: RawRelation[], related = false): Link[] {
+  const out: Link[] = [];
+  for (const r of relations) {
+    if (!r.source?.id || !r.target?.id) continue;
+    const rel = r.rel ?? HIERARCHY;
+    const kind =
+      rel === HIERARCHY
+        ? "child"
+        : !related
+          ? undefined
+          : rel.startsWith("System.LinkTypes.Related")
+            ? "related"
+            : rel === "Microsoft.VSTS.Common.TestedBy-Forward"
+              ? "tested"
+              : undefined;
+    if (kind) out.push({ source: r.source.id, target: r.target.id, kind });
+  }
+  return out;
+}
+
+/** Kapalı sayılan durumlar: projesi bilinen kayıt için o projenin durumları, bilinmeyen için `fallback`. */
+export interface ClosedStates {
+  byProject: Map<string, string[]>;
+  fallback: string[];
+}
+
+/**
+ * Büyük/küçük harf ayırmadan karşılaştırma için: Türkçe kurala göre küçültür, sonra ı'yı i sayar.
+ * Böylece hem "İPTAL"/"iptal" hem de "HOTFIX"/"HotFix" eşleşir.
+ */
+const lower = (s: unknown) => String(s ?? "").toLocaleLowerCase("tr").replace(/ı/g, "i");
+
+/** Projesinin durumları bilinmiyorsa ClosedDate'i dolu olan kayıt da kapalı sayılır. */
+export function isClosedRaw(r: RawWorkItem, states: ClosedStates): boolean {
+  const known = states.byProject.get(String(r.fields["System.TeamProject"] ?? ""));
+  const state = lower(r.fields["System.State"]);
+  if (known) return known.some((s) => lower(s) === state);
+  return states.fallback.some((s) => lower(s) === state) || time(r.fields["Microsoft.VSTS.Common.ClosedDate"]) !== undefined;
 }
 
 /** Aralıkta kapanmış work item'lar. */
@@ -137,6 +294,7 @@ export function linksWiql(states: string[], opts: LoadOptions, now: number, proj
 }
 
 export interface RawRelation {
+  rel?: string | null;
   source?: { id: number } | null;
   target?: { id: number } | null;
 }
@@ -164,10 +322,16 @@ const personName = (v: unknown): string | undefined => {
 };
 
 /**
- * @param counts Link sorgusundan gelen child sayıları; yoksa (sorgu başarısızsa) yüklenen kayıtların
+ * @param counts Link sorgusundan gelen child sayıları; bir kayıt orada yoksa yüklenen kayıtların
  *               parent alanından türetilir, bu durumda yalnızca aralıkta kapanan child'lar sayılır.
  */
-export function toItems(raw: (RawWorkItem | null)[], baseUrl: string, counts?: Map<number, number>): Item[] {
+export function toItems(
+  raw: (RawWorkItem | null)[],
+  baseUrl: string,
+  counts?: Map<number, number>,
+  /** Related / Tested By bağlantısıyla ulaşılan kayıt id'si → bağlı olduğu kayıt ve bağlantı türü. */
+  relatedTo?: Map<number, { to: number; via: Via }>,
+): Item[] {
   const items: Item[] = [];
   for (const r of raw) {
     if (!r) continue;
@@ -182,21 +346,64 @@ export function toItems(raw: (RawWorkItem | null)[], baseUrl: string, counts?: M
       title: String(f["System.Title"] ?? ""),
       type: String(f["System.WorkItemType"] ?? ""),
       state: String(f["System.State"] ?? ""),
+      project: String(f["System.TeamProject"] ?? ""),
       assignee: personName(f["System.AssignedTo"]),
       created,
       closed,
       activated,
       parentId: typeof parent === "number" ? parent : undefined,
+      relatedTo: typeof parent === "number" ? undefined : relatedTo?.get(r.id)?.to,
+      via: typeof parent === "number" ? undefined : relatedTo?.get(r.id)?.via,
       childCount: 0,
       leadDays: (closed - created) / DAY_MS,
       cycleDays: activated !== undefined && activated >= created && activated <= closed ? (closed - activated) / DAY_MS : undefined,
       url: `${withSlash(baseUrl)}_workitems/edit/${r.id}`,
     });
   }
+  // Link sorgusunun kapsamadığı kayıtlar (başka projedeki parent'lar) için de sayı türetilir.
   const derived = new Map<number, number>();
-  if (!counts) for (const i of items) if (i.parentId) derived.set(i.parentId, (derived.get(i.parentId) ?? 0) + 1);
-  for (const i of items) i.childCount = (counts ?? derived).get(i.id) ?? 0;
+  for (const i of items) {
+    const up = i.parentId ?? i.relatedTo;
+    if (up) derived.set(up, (derived.get(up) ?? 0) + 1);
+  }
+  for (const i of items) i.childCount = counts?.get(i.id) ?? derived.get(i.id) ?? 0;
   return items;
+}
+
+/** Listede olmayan parent id'leri: aralıkta ya da bu projede kapanmamış parent'lar. */
+export function missingParentIds(items: Item[]): number[] {
+  const loaded = new Set(items.map((i) => i.id));
+  return [...new Set(items.map((i) => i.parentId).filter((p): p is number => p !== undefined && !loaded.has(p)))];
+}
+
+/** Sonradan okunan parent'ları kapalı / açık diye ayırır. */
+export function splitParents(raw: (RawWorkItem | null)[], states: ClosedStates): { closed: RawWorkItem[]; open: RawWorkItem[] } {
+  const closed: RawWorkItem[] = [];
+  const open: RawWorkItem[] = [];
+  for (const r of raw) if (r) (isClosedRaw(r, states) ? closed : open).push(r);
+  return { closed, open };
+}
+
+/** @param children Aralıkta kapanan kayıtlar; her parent'ın kapanan child sayısı buradan çıkar. En yaşlı önce. */
+export function toOpenParents(raw: RawWorkItem[], baseUrl: string, children: Item[], now: number): OpenParent[] {
+  const counts = new Map<number, number>();
+  for (const c of children) if (c.parentId) counts.set(c.parentId, (counts.get(c.parentId) ?? 0) + 1);
+  return raw
+    .map((r) => {
+      const created = time(r.fields["System.CreatedDate"]) ?? now;
+      return {
+        id: r.id,
+        title: String(r.fields["System.Title"] ?? ""),
+        type: String(r.fields["System.WorkItemType"] ?? ""),
+        state: String(r.fields["System.State"] ?? ""),
+        assignee: personName(r.fields["System.AssignedTo"]),
+        created,
+        ageDays: Math.max(0, (now - created) / DAY_MS),
+        closedChildren: counts.get(r.id) ?? 0,
+        url: `${withSlash(baseUrl)}_workitems/edit/${r.id}`,
+      };
+    })
+    .sort((a, b) => b.ageDays - a.ageDays);
 }
 
 /** Kapanışı [from, to] yerel gün aralığına düşen kayıtlar. */
@@ -208,8 +415,9 @@ export function inRange(items: Item[], opts: LoadOptions): Item[] {
 
 export function hasRole(item: Item, role: Role): boolean {
   if (role === "parent") return item.childCount > 0;
-  if (role === "child") return item.parentId !== undefined;
-  return item.childCount === 0 && item.parentId === undefined;
+  const linked = item.parentId !== undefined || item.relatedTo !== undefined;
+  if (role === "child") return linked;
+  return item.childCount === 0 && !linked;
 }
 
 /** Sıralı listede doğrusal ara değerli yüzdelik (p: 0–1). */
@@ -256,13 +464,17 @@ export function weekly(items: Item[]): Week[] {
     .map(([start, days]) => ({ start, count: days.length, median: stats(days)!.median }));
 }
 
-/** Work item türüne göre lead time; en çok kayıt olan tür önce. */
-export function byType(items: Item[]): { type: string; stats: Stats }[] {
+/** Bir alana (tür, proje) göre lead time; en çok kayıt olan grup önce. */
+export function groupStats(items: Item[], key: (i: Item) => string): { name: string; stats: Stats }[] {
   const groups = new Map<string, number[]>();
-  for (const i of items) groups.set(i.type, [...(groups.get(i.type) ?? []), i.leadDays]);
+  for (const i of items) {
+    const list = groups.get(key(i));
+    if (list) list.push(i.leadDays);
+    else groups.set(key(i), [i.leadDays]);
+  }
   return [...groups.entries()]
-    .map(([type, days]) => ({ type, stats: stats(days)! }))
-    .sort((a, b) => b.stats.count - a.stats.count || a.type.localeCompare(b.type));
+    .map(([name, days]) => ({ name, stats: stats(days)! }))
+    .sort((a, b) => b.stats.count - a.stats.count || a.name.localeCompare(b.name));
 }
 
 /** Süre metni: bir günden kısaysa saat, değilse bir ondalıklı gün. */
@@ -273,6 +485,104 @@ export function formatDays(days: number | undefined, units: { day: string; hour:
 }
 
 export function matches(query: string, ...texts: (string | number | undefined)[]): boolean {
-  const q = query.trim().toLocaleLowerCase("tr");
-  return !q || texts.some((t) => t !== undefined && String(t).toLocaleLowerCase("tr").includes(q));
+  const q = lower(query.trim());
+  return !q || texts.some((t) => t !== undefined && lower(t).includes(q));
+}
+
+type Cell = string | number | undefined;
+
+/**
+ * CSV metni. Excel'in Türkçe kurulumu ayırıcı olarak `;` ve ondalık için `,` beklediğinden ikisi de
+ * dile göre seçilir. =, +, -, @ ile başlayan metinler Excel'de formül olarak çalışmasın diye ' ile başlatılır.
+ */
+export function toCsv(rows: Cell[][], separator: string, decimal: string): string {
+  const cell = (v: Cell) => {
+    if (v === undefined) return "";
+    if (typeof v === "number") return String(v).replace(".", decimal);
+    const text = /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
+    return /["\r\n]/.test(text) || text.includes(separator) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  return rows.map((r) => r.map(cell).join(separator)).join("\r\n");
+}
+
+/** Yerel saatle YYYY-AA-GG SS:DD; Excel her dilde tarih olarak tanır. */
+export function toDateTime(time: number): string {
+  const d = new Date(time);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${toDateInput(time)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+const round2 = (n: number | undefined) => (n === undefined ? undefined : Math.round(n * 100) / 100);
+
+/** Dışa aktarılan satırlar; başlık satırı çağıran tarafından eklenir. */
+export function exportRows(items: Item[]): Cell[][] {
+  return items.map((i) => [
+    i.id,
+    i.title,
+    i.type,
+    i.state,
+    i.project,
+    i.assignee,
+    i.parentId ?? i.relatedTo,
+    i.parentId !== undefined ? "Child" : i.via === "related" ? "Related" : i.via === "tested" ? "Tested By" : undefined,
+    i.childCount,
+    toDateTime(i.created),
+    toDateTime(i.closed),
+    round2(i.leadDays),
+    round2(i.cycleDays),
+  ]);
+}
+
+/**
+ * Rapor için aday kayıtlar: açılışı ya da durum değişimi aralığa düşenler. Aralıkta açılanlar ilk koşulla,
+ * aralıkta kapananlar ikinciyle gelir (kapalı kaydın son durum değişimi kapanışıdır). Sorgu iki uçtan
+ * sınırlıdır; geçmişteki bir ay sorulduğunda o günden bugüne değişen her şey okunmaz.
+ */
+export function reportWiql(opts: LoadOptions, now: number, project?: string): string {
+  const parts = dateClause("", opts, now, "either");
+  if (project) parts.unshift(`[System.TeamProject] = ${quote(project)}`);
+  return `SELECT [System.Id] FROM WorkItems WHERE ${parts.join(" AND ")} ORDER BY [System.Id]`;
+}
+
+/**
+ * Kart tipine göre açılış/kapanış sayıları. Aralıkta açılan her kayıt ya "açılıp kapanan" ya da
+ * "hâlâ açık" sütununa girer: aralık bittikten sonra kapanan kayıt, aralık sonunda açık sayılır.
+ * `opts.types` doluysa yalnızca o tipler sayılır (büyük/küçük harf ayırmadan); toplam da onlara göredir.
+ */
+export function buildReport(raw: RawWorkItem[], states: ClosedStates, opts: LoadOptions): { rows: ReportRow[]; total: ReportRow } {
+  const from = dayStart(opts.from);
+  const end = dayStart(opts.to) + DAY_MS;
+  const inside = (t: number | undefined): t is number => t !== undefined && t >= from && t < end;
+  const groups = new Map<string, { row: ReportRow; lead: number[] }>();
+  const all = { row: { type: "", openedClosed: 0, stillOpen: 0, closedOlder: 0 } as ReportRow, lead: [] as number[] };
+  const wanted = (opts.types ?? []).map((s) => lower(s.trim())).filter(Boolean);
+  for (const r of raw) {
+    const created = time(r.fields["System.CreatedDate"]);
+    if (created === undefined) continue;
+    if (wanted.length > 0 && !wanted.includes(lower(r.fields["System.WorkItemType"]))) continue;
+    const closed = isClosedRaw(r, states)
+      ? (time(r.fields["Microsoft.VSTS.Common.ClosedDate"]) ?? time(r.fields["Microsoft.VSTS.Common.StateChangeDate"]))
+      : undefined;
+    const key: keyof Omit<ReportRow, "type" | "median"> | undefined = inside(created)
+      ? inside(closed)
+        ? "openedClosed"
+        : "stillOpen"
+      : inside(closed) && created < from
+        ? "closedOlder"
+        : undefined;
+    if (!key) continue;
+    const type = String(r.fields["System.WorkItemType"] ?? "");
+    let group = groups.get(type);
+    if (!group) groups.set(type, (group = { row: { type, openedClosed: 0, stillOpen: 0, closedOlder: 0 }, lead: [] }));
+    for (const g of [group, all]) {
+      g.row[key]++;
+      if (key !== "stillOpen" && closed !== undefined) g.lead.push((closed - created) / DAY_MS);
+    }
+  }
+  const finish = (g: { row: ReportRow; lead: number[] }) => ({ ...g.row, median: stats(g.lead)?.median });
+  const count = (r: ReportRow) => r.openedClosed + r.stillOpen + r.closedOlder;
+  return {
+    rows: [...groups.values()].map(finish).sort((a, b) => count(b) - count(a) || a.type.localeCompare(b.type)),
+    total: finish(all),
+  };
 }
