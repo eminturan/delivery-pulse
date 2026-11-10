@@ -1,0 +1,78 @@
+{
+  "manifestVersion": 1,
+  "id": "delivery-pulse",
+  "publisher": "turanemin",
+  "version": "0.1.0",
+  "name": "Delivery Pulse",
+  "description": "Lead time of work items from creation to closure, measured separately for parents and children.",
+  "public": true,
+  "categories": [
+    "Azure Boards"
+  ],
+  "tags": [
+    "lead time",
+    "cycle time",
+    "delivery",
+    "work items",
+    "metrics"
+  ],
+  "targets": [
+    {
+      "id": "Microsoft.VisualStudio.Services"
+    }
+  ],
+  "scopes": [
+    "vso.work"
+  ],
+  "icons": {
+    "default": "static/icon.png"
+  },
+  "branding": {
+    "color": "#0B6A5B",
+    "theme": "dark"
+  },
+  "content": {
+    "details": {
+      "path": "overview.md"
+    },
+    "license": {
+      "path": "LICENSE"
+    }
+  },
+  "links": {
+    "repository": {
+      "uri": "https://github.com/eminturan/delivery-pulse"
+    },
+    "issues": {
+      "uri": "https://github.com/eminturan/delivery-pulse/issues"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "uri": "https://github.com/eminturan/delivery-pulse"
+  },
+  "contributions": [
+    {
+      "id": "hub",
+      "type": "ms.vss-web.hub",
+      "targets": [
+        "ms.vss-work-web.work-hub-group"
+      ],
+      "properties": {
+        "name": "Delivery Pulse",
+        "order": 2,
+        "uri": "dist/hub/hub.html"
+      }
+    }
+  ],
+  "files": [
+    {
+      "path": "dist",
+      "addressable": true
+    },
+    {
+      "path": "static",
+      "addressable": true
+    }
+  ]
+}
