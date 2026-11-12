@@ -30,6 +30,13 @@ export interface Item {
   url: string;
 }
 
+/** Rapor grupları: aralıkta açılıp kapanan, aralıkta açılıp hâlâ açık olan, önceden açılıp aralıkta kapanan. */
+export type Flow = "openedClosed" | "stillOpen" | "closedOlder";
+export const FLOWS: Flow[] = ["openedClosed", "stillOpen", "closedOlder"];
+
+/** Listede gösterilen kayıt: kapanmamış olabilir (o zaman kapanış ve lead time boştur). */
+export type ListItem = Omit<Item, "closed" | "leadDays"> & { closed?: number; leadDays?: number; flow?: Flow };
+
 export type Via = "related" | "tested";
 
 /** parent: child'ı olan; child: parent'ı olan; standalone: ikisi de olmayan. Bir kayıt hem parent hem child olabilir. */
@@ -100,13 +107,17 @@ export interface ReportRow {
   stillOpen: number;
   /** Aralıktan önce açılıp aralıkta kapanan. */
   closedOlder: number;
-  /** Aralıkta kapananların medyan lead time'ı (gün). */
+  /** Aralıkta açılıp aralıkta kapananların ortalama lead time'ı (gün). */
+  avg?: number;
+  /** Aralıkta açılıp aralıkta kapananların medyan lead time'ı (gün). */
   median?: number;
 }
 
 export interface ReportData {
   rows: ReportRow[];
   total: ReportRow;
+  /** Sayılan kayıtlar; her birinin `flow` alanı hangi gruba girdiğini söyler. */
+  items: ListItem[];
   truncated: boolean;
   warnings: string[];
 }
@@ -124,6 +135,9 @@ export const DEFAULT_CLOSED_STATES = ["Closed", "Done", "Completed", "Tamamland�
  * Sunucunun harf duyarlılığına bağlı kalmamak için yazım biçimleri ayrı ayrı yer alır.
  */
 export const CANCELLED_STATES = ["İptal", "iptal", "Iptal"];
+
+/** Kayıt iptal durumunda mı (büyük/küçük harf ayırmadan). */
+export const isCancelled = (i: { state: string }) => lower(i.state) === "iptal";
 
 /** Durum listesine iptal durumlarını ekler (yinelenmeden). */
 export const withCancelled = (states: string[]) => [...new Set([...states, ...CANCELLED_STATES])];
@@ -165,6 +179,24 @@ export function toDateInput(time: number): string {
 /** Bugünden kaç gün önce (yerel gün farkı). */
 export function daysAgo(date: string, now: number): number {
   return Math.round((dayStart(toDateInput(now)) - dayStart(date)) / DAY_MS);
+}
+
+/**
+ * Aralığı gün sınırından ikiye böler; tek günlük ya da geçersiz aralık bölünemez.
+ * Sunucu sınırına takılan sorgu daha dar aralıklarla yeniden çalıştırılırken kullanılır.
+ */
+export function splitRange<T extends { from: string; to: string }>(opts: T): [T, T] | undefined {
+  const from = dayStart(opts.from);
+  const to = dayStart(opts.to);
+  const days = Math.round((to - from) / DAY_MS);
+  if (Number.isNaN(days) || days < 1) return undefined;
+  // Gün ortasına eklenir: yaz/kış saati geçişinde gün kaymaz.
+  const day = (n: number) => toDateInput(from + n * DAY_MS + DAY_MS / 2);
+  const half = Math.floor(days / 2);
+  return [
+    { ...opts, to: day(half) },
+    { ...opts, from: day(half + 1) },
+  ];
 }
 
 const quote = (s: string) => `'${s.replace(/'/g, "''")}'`;
@@ -339,35 +371,54 @@ export function toItems(
     const created = time(f["System.CreatedDate"]);
     const closed = time(f["Microsoft.VSTS.Common.ClosedDate"]) ?? time(f["Microsoft.VSTS.Common.StateChangeDate"]);
     if (created === undefined || closed === undefined || closed < created) continue;
-    const activated = time(f["Microsoft.VSTS.Common.ActivatedDate"]);
-    const parent = f["System.Parent"];
-    items.push({
-      id: r.id,
-      title: String(f["System.Title"] ?? ""),
-      type: String(f["System.WorkItemType"] ?? ""),
-      state: String(f["System.State"] ?? ""),
-      project: String(f["System.TeamProject"] ?? ""),
-      assignee: personName(f["System.AssignedTo"]),
-      created,
-      closed,
-      activated,
-      parentId: typeof parent === "number" ? parent : undefined,
-      relatedTo: typeof parent === "number" ? undefined : relatedTo?.get(r.id)?.to,
-      via: typeof parent === "number" ? undefined : relatedTo?.get(r.id)?.via,
-      childCount: 0,
-      leadDays: (closed - created) / DAY_MS,
-      cycleDays: activated !== undefined && activated >= created && activated <= closed ? (closed - activated) / DAY_MS : undefined,
-      url: `${withSlash(baseUrl)}_workitems/edit/${r.id}`,
-    });
+    items.push({ ...describe(r, created, closed, baseUrl, relatedTo), closed, leadDays: (closed - created) / DAY_MS });
   }
-  // Link sorgusunun kapsamadığı kayıtlar (başka projedeki parent'lar) için de sayı türetilir.
+  countChildren(items, counts);
+  return items;
+}
+
+/** Ham kaydın liste satırı; `closed` verilmezse kayıt açık sayılır. */
+function describe(
+  r: RawWorkItem,
+  created: number,
+  closed: number | undefined,
+  baseUrl: string,
+  relatedTo?: Map<number, { to: number; via: Via }>,
+): ListItem {
+  const f = r.fields;
+  const activated = time(f["Microsoft.VSTS.Common.ActivatedDate"]);
+  const parent = f["System.Parent"];
+  return {
+    id: r.id,
+    title: String(f["System.Title"] ?? ""),
+    type: String(f["System.WorkItemType"] ?? ""),
+    state: String(f["System.State"] ?? ""),
+    project: String(f["System.TeamProject"] ?? ""),
+    assignee: personName(f["System.AssignedTo"]),
+    created,
+    closed,
+    activated,
+    parentId: typeof parent === "number" ? parent : undefined,
+    relatedTo: typeof parent === "number" ? undefined : relatedTo?.get(r.id)?.to,
+    via: typeof parent === "number" ? undefined : relatedTo?.get(r.id)?.via,
+    childCount: 0,
+    leadDays: closed === undefined ? undefined : (closed - created) / DAY_MS,
+    cycleDays:
+      closed !== undefined && activated !== undefined && activated >= created && activated <= closed
+        ? (closed - activated) / DAY_MS
+        : undefined,
+    url: `${withSlash(baseUrl)}_workitems/edit/${r.id}`,
+  };
+}
+
+/** Child sayıları: link sorgusunun kapsamadığı kayıtlar (başka projedeki parent'lar) için listeden türetilir. */
+function countChildren(items: ListItem[], counts?: Map<number, number>) {
   const derived = new Map<number, number>();
   for (const i of items) {
     const up = i.parentId ?? i.relatedTo;
     if (up) derived.set(up, (derived.get(up) ?? 0) + 1);
   }
   for (const i of items) i.childCount = counts?.get(i.id) ?? derived.get(i.id) ?? 0;
-  return items;
 }
 
 /** Listede olmayan parent id'leri: aralıkta ya da bu projede kapanmamış parent'lar. */
@@ -506,7 +557,8 @@ export function toCsv(rows: Cell[][], separator: string, decimal: string): strin
 }
 
 /** Yerel saatle YYYY-AA-GG SS:DD; Excel her dilde tarih olarak tanır. */
-export function toDateTime(time: number): string {
+export function toDateTime(time: number | undefined): string | undefined {
+  if (time === undefined) return undefined;
   const d = new Date(time);
   const p = (n: number) => String(n).padStart(2, "0");
   return `${toDateInput(time)} ${p(d.getHours())}:${p(d.getMinutes())}`;
@@ -515,7 +567,7 @@ export function toDateTime(time: number): string {
 const round2 = (n: number | undefined) => (n === undefined ? undefined : Math.round(n * 100) / 100);
 
 /** Dışa aktarılan satırlar; başlık satırı çağıran tarafından eklenir. */
-export function exportRows(items: Item[]): Cell[][] {
+export function exportRows(items: ListItem[]): Cell[][] {
   return items.map((i) => [
     i.id,
     i.title,
@@ -549,13 +601,18 @@ export function reportWiql(opts: LoadOptions, now: number, project?: string): st
  * "hâlâ açık" sütununa girer: aralık bittikten sonra kapanan kayıt, aralık sonunda açık sayılır.
  * `opts.types` doluysa yalnızca o tipler sayılır (büyük/küçük harf ayırmadan); toplam da onlara göredir.
  */
-export function buildReport(raw: RawWorkItem[], states: ClosedStates, opts: LoadOptions): { rows: ReportRow[]; total: ReportRow } {
+export function buildReport(
+  raw: RawWorkItem[],
+  states: ClosedStates,
+  opts: LoadOptions,
+  baseUrl = "",
+  relatedTo?: Map<number, { to: number; via: Via }>,
+): { rows: ReportRow[]; total: ReportRow; items: ListItem[] } {
   const from = dayStart(opts.from);
   const end = dayStart(opts.to) + DAY_MS;
   const inside = (t: number | undefined): t is number => t !== undefined && t >= from && t < end;
-  const groups = new Map<string, { row: ReportRow; lead: number[] }>();
-  const all = { row: { type: "", openedClosed: 0, stillOpen: 0, closedOlder: 0 } as ReportRow, lead: [] as number[] };
   const wanted = (opts.types ?? []).map((s) => lower(s.trim())).filter(Boolean);
+  const items: ListItem[] = [];
   for (const r of raw) {
     const created = time(r.fields["System.CreatedDate"]);
     if (created === undefined) continue;
@@ -563,23 +620,39 @@ export function buildReport(raw: RawWorkItem[], states: ClosedStates, opts: Load
     const closed = isClosedRaw(r, states)
       ? (time(r.fields["Microsoft.VSTS.Common.ClosedDate"]) ?? time(r.fields["Microsoft.VSTS.Common.StateChangeDate"]))
       : undefined;
-    const key: keyof Omit<ReportRow, "type" | "median"> | undefined = inside(created)
+    const flow: Flow | undefined = inside(created)
       ? inside(closed)
         ? "openedClosed"
         : "stillOpen"
       : inside(closed) && created < from
         ? "closedOlder"
         : undefined;
-    if (!key) continue;
-    const type = String(r.fields["System.WorkItemType"] ?? "");
-    let group = groups.get(type);
-    if (!group) groups.set(type, (group = { row: { type, openedClosed: 0, stillOpen: 0, closedOlder: 0 }, lead: [] }));
+    if (!flow) continue;
+    // Aralık bittikten sonra kapanan kayıt aralık sonunda açıktır: kapanışı gösterilmez.
+    items.push({ ...describe(r, created, flow === "stillOpen" ? undefined : closed, baseUrl, relatedTo), flow });
+  }
+  countChildren(items);
+  return { ...summarize(items), items };
+}
+
+/** Kayıtların kart tipine göre grup sayıları ve toplamı. */
+export function summarize(items: ListItem[]): { rows: ReportRow[]; total: ReportRow } {
+  const groups = new Map<string, { row: ReportRow; lead: number[] }>();
+  const all = { row: { type: "", openedClosed: 0, stillOpen: 0, closedOlder: 0 } as ReportRow, lead: [] as number[] };
+  for (const i of items) {
+    if (!i.flow) continue;
+    let group = groups.get(i.type);
+    if (!group) groups.set(i.type, (group = { row: { type: i.type, openedClosed: 0, stillOpen: 0, closedOlder: 0 }, lead: [] }));
     for (const g of [group, all]) {
-      g.row[key]++;
-      if (key !== "stillOpen" && closed !== undefined) g.lead.push((closed - created) / DAY_MS);
+      g.row[i.flow]++;
+      // Süre yalnızca aralıkta açılıp aralıkta kapananlardan hesaplanır.
+      if (i.flow === "openedClosed" && i.leadDays !== undefined) g.lead.push(i.leadDays);
     }
   }
-  const finish = (g: { row: ReportRow; lead: number[] }) => ({ ...g.row, median: stats(g.lead)?.median });
+  const finish = (g: { row: ReportRow; lead: number[] }) => {
+    const s = stats(g.lead);
+    return { ...g.row, avg: s?.avg, median: s?.median };
+  };
   const count = (r: ReportRow) => r.openedClosed + r.stillOpen + r.closedOlder;
   return {
     rows: [...groups.values()].map(finish).sort((a, b) => count(b) - count(a) || a.type.localeCompare(b.type)),

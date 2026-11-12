@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "delivery-pulse",
   "publisher": "turanemin",
-  "version": "0.1.8",
+  "version": "0.1.17",
   "name": "Delivery Pulse",
   "description": "Lead time of work items from creation to closure, measured separately for parents and children.",
   "public": true,

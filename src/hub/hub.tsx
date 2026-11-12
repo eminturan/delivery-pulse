@@ -4,7 +4,11 @@ import "./hub.css";
 import * as React from "react";
 import * as ReactDOM from "react-dom";
 import * as SDK from "azure-devops-extension-sdk";
-import { CommonServiceIds, ILocationService, IProjectPageService } from "azure-devops-extension-api/Common/CommonServices";
+import {
+  CommonServiceIds,
+  ILocationService,
+  IProjectPageService,
+} from "azure-devops-extension-api/Common/CommonServices";
 import { Header, TitleSize } from "azure-devops-ui/Header";
 import { MessageCard, MessageCardSeverity } from "azure-devops-ui/MessageCard";
 import { Page } from "azure-devops-ui/Page";
@@ -16,16 +20,18 @@ import {
   DataSource,
   DAY_MS,
   exportRows,
+  Flow,
+  FLOWS,
+  isCancelled,
   formatDays,
   groupStats,
-  hasRole,
   Item,
   leadStats,
+  ListItem,
   matches,
   OpenParent,
   PulseData,
-  Role,
-  ROLES,
+  ReportData,
   toCsv,
   toDateInput,
   weekly,
@@ -38,27 +44,58 @@ const DEFAULT_DAYS = 90;
 const OPTION_DELAY_MS = 500;
 const PAGE_SIZE = 100;
 
-type SortKey = "id" | "title" | "type" | "project" | "assignee" | "created" | "closed" | "lead" | "cycle" | "children";
+type SortKey =
+  | "id"
+  | "title"
+  | "type"
+  | "project"
+  | "assignee"
+  | "created"
+  | "closed"
+  | "lead"
+  | "cycle"
+  | "children";
 
-const SORTERS: Record<SortKey, (i: Item) => string | number> = {
+const SORTERS: Record<SortKey, (i: ListItem) => string | number> = {
   id: (i) => i.id,
   title: (i) => i.title.toLocaleLowerCase("tr"),
   type: (i) => i.type,
   project: (i) => i.project,
   assignee: (i) => (i.assignee ?? "").toLocaleLowerCase("tr"),
   created: (i) => i.created,
-  closed: (i) => i.closed,
-  lead: (i) => i.leadDays,
+  closed: (i) => i.closed ?? Infinity,
+  lead: (i) => i.leadDays ?? -1,
   cycle: (i) => i.cycleDays ?? -1,
   children: (i) => i.childCount,
 };
 
-function Card(props: { label: string; value: string; hint?: string }) {
-  return (
-    <div className="dp-card" title={props.hint}>
+/** `onClick` verilirse kart bir düğmedir; `active` seçili olduğunu gösterir. */
+function Card(props: {
+  label: string;
+  value: string;
+  hint?: string;
+  active?: boolean;
+  onClick?: () => void;
+}) {
+  const body = (
+    <>
       <div className="dp-card-value">{props.value}</div>
       <div className="dp-card-label">{props.label}</div>
       {props.hint && <div className="dp-muted">{props.hint}</div>}
+    </>
+  );
+  return props.onClick ? (
+    <button
+      className={`dp-card dp-card-button${props.active ? " dp-card-active" : ""}`}
+      title={props.hint}
+      aria-pressed={!!props.active}
+      onClick={props.onClick}
+    >
+      {body}
+    </button>
+  ) : (
+    <div className="dp-card" title={props.hint}>
+      {body}
     </div>
   );
 }
@@ -67,7 +104,11 @@ function WeeklyChart({ items, t }: { items: Item[]; t: Strings }) {
   const weeks = weekly(items);
   if (weeks.length === 0) return null;
   const max = Math.max(...weeks.map((w) => w.median), 0.01);
-  const date = (ms: number) => new Date(ms).toLocaleDateString(t.locale, { day: "numeric", month: "short" });
+  const date = (ms: number) =>
+    new Date(ms).toLocaleDateString(t.locale, {
+      day: "numeric",
+      month: "short",
+    });
   return (
     <section>
       <h3 className="dp-h">{t.weeklyTitle}</h3>
@@ -79,8 +120,13 @@ function WeeklyChart({ items, t }: { items: Item[]; t: Strings }) {
             key={w.start}
             title={`${date(w.start)} – ${date(w.start + 6 * DAY_MS)}: ${formatDays(w.median, t.units, t.locale)}, ${w.count}`}
           >
-            <div className="dp-week-value">{formatDays(w.median, t.units, t.locale)}</div>
-            <div className="dp-bar" style={{ height: `${Math.max(2, (w.median / max) * 120)}px` }} />
+            <div className="dp-week-value">
+              {formatDays(w.median, t.units, t.locale)}
+            </div>
+            <div
+              className="dp-bar"
+              style={{ height: `${Math.max(2, (w.median / max) * 120)}px` }}
+            />
             <div className="dp-week-label">{date(w.start)}</div>
             <div className="dp-muted">{w.count}</div>
           </div>
@@ -90,7 +136,13 @@ function WeeklyChart({ items, t }: { items: Item[]; t: Strings }) {
   );
 }
 
-function GroupTable(props: { items: Item[]; t: Strings; title: string; label: string; group: (i: Item) => string }) {
+function GroupTable(props: {
+  items: Item[];
+  t: Strings;
+  title: string;
+  label: string;
+  group: (i: Item) => string;
+}) {
   const { items, t } = props;
   const fmt = (d: number) => formatDays(d, t.units, t.locale);
   return (
@@ -124,7 +176,9 @@ function GroupTable(props: { items: Item[]; t: Strings; title: string; label: st
 
 /** Metni dosya olarak indirir. Baştaki BOM, Excel'in Türkçe karakterleri doğru okuması içindir. */
 function download(name: string, text: string) {
-  const url = URL.createObjectURL(new Blob(["\ufeff", text], { type: "text/csv;charset=utf-8" }));
+  const url = URL.createObjectURL(
+    new Blob(["\ufeff", text], { type: "text/csv;charset=utf-8" }),
+  );
   const a = document.createElement("a");
   a.href = url;
   a.download = name;
@@ -134,9 +188,20 @@ function download(name: string, text: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function ItemTable({ items, role, t }: { items: Item[]; role: Role; t: Strings }) {
+function ItemTable({
+  items,
+  name,
+  t,
+}: {
+  items: ListItem[];
+  name: string;
+  t: Strings;
+}) {
   const [query, setQuery] = React.useState("");
-  const [sort, setSort] = React.useState<{ key: SortKey; desc: boolean }>({ key: "lead", desc: true });
+  const [sort, setSort] = React.useState<{ key: SortKey; desc: boolean }>({
+    key: "lead",
+    desc: true,
+  });
   const [limit, setLimit] = React.useState(PAGE_SIZE);
   const rows = React.useMemo(() => {
     const get = SORTERS[sort.key];
@@ -148,13 +213,21 @@ function ItemTable({ items, role, t }: { items: Item[]; role: Role; t: Strings }
         return (x < y ? -1 : x > y ? 1 : 0) * (sort.desc ? -1 : 1);
       });
   }, [items, query, sort]);
-  const date = (ms: number) => new Date(ms).toLocaleDateString(t.locale);
+  const date = (ms?: number) =>
+    ms === undefined ? "—" : new Date(ms).toLocaleDateString(t.locale);
   const fmt = (d?: number) => formatDays(d, t.units, t.locale);
   const head = (key: SortKey, label: string, num = false) => (
-    <th className={num ? "dp-num" : undefined} aria-sort={sort.key === key ? (sort.desc ? "descending" : "ascending") : undefined}>
+    <th
+      className={num ? "dp-num" : undefined}
+      aria-sort={
+        sort.key === key ? (sort.desc ? "descending" : "ascending") : undefined
+      }
+    >
       <button
         className="dp-sort"
-        onClick={() => setSort((s) => ({ key, desc: s.key === key ? !s.desc : num }))}
+        onClick={() =>
+          setSort((s) => ({ key, desc: s.key === key ? !s.desc : num }))
+        }
       >
         {label}
         {sort.key === key ? (sort.desc ? " ▼" : " ▲") : ""}
@@ -176,14 +249,37 @@ function ItemTable({ items, role, t }: { items: Item[]; role: Role; t: Strings }
             setLimit(PAGE_SIZE);
           }}
         />
-        <span className="dp-muted">{t.shown(Math.min(limit, rows.length), rows.length)}</span>
+        <span className="dp-muted">
+          {t.shown(Math.min(limit, rows.length), rows.length)}
+        </span>
         <button
           className="dp-button"
           disabled={rows.length === 0}
           onClick={() => {
             // Yalnızca ekranda görünen ilk sayfa değil, arama ve sıralamadan geçen tüm satırlar aktarılır.
-            const header = [t.col.id, t.col.title, t.col.type, t.state, t.col.project, t.col.assignee, t.col.parent, t.csv.link, t.col.children, t.col.created, t.col.closed, t.csv.leadDays, t.csv.cycleDays];
-            download(`delivery-pulse-${role}-${toDateInput(Date.now())}.csv`, toCsv([header, ...exportRows(rows)], t.csv.separator, t.csv.decimal));
+            const header = [
+              t.col.id,
+              t.col.title,
+              t.col.type,
+              t.state,
+              t.col.project,
+              t.col.assignee,
+              t.col.parent,
+              t.csv.link,
+              t.col.children,
+              t.col.created,
+              t.col.closed,
+              t.csv.leadDays,
+              t.csv.cycleDays,
+            ];
+            download(
+              `delivery-pulse-${name}-${toDateInput(Date.now())}.csv`,
+              toCsv(
+                [header, ...exportRows(rows)],
+                t.csv.separator,
+                t.csv.decimal,
+              ),
+            );
           }}
         >
           {t.exportCsv}
@@ -198,8 +294,8 @@ function ItemTable({ items, role, t }: { items: Item[]; role: Role; t: Strings }
               {head("type", t.col.type)}
               {head("project", t.col.project)}
               {head("assignee", t.col.assignee)}
-              {role === "parent" && head("children", t.col.children, true)}
-              {role === "child" && <th className="dp-num">{t.col.parent}</th>}
+              {head("children", t.col.children, true)}
+              <th className="dp-num">{t.col.parent}</th>
               {head("created", t.col.created, true)}
               {head("closed", t.col.closed, true)}
               {head("lead", t.col.lead, true)}
@@ -211,27 +307,41 @@ function ItemTable({ items, role, t }: { items: Item[]; role: Role; t: Strings }
               <tr key={i.id}>
                 <td className="dp-num">{i.id}</td>
                 <td className="dp-title">
-                  <a className="dp-link" href={i.url} target="_blank" rel="noopener noreferrer">
+                  <a
+                    className="dp-link"
+                    href={i.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
                     {i.title}
                   </a>
                 </td>
                 <td>{i.type}</td>
                 <td>{i.project || "—"}</td>
                 <td>{i.assignee ?? "—"}</td>
-                {role === "parent" && <td className="dp-num">{i.childCount}</td>}
-                {role === "child" && (
-                  <td className="dp-num">
-                    {i.via && <span className="dp-muted">{t.via[i.via]} </span>}
-                    <a
-                      className="dp-link"
-                      href={i.url.replace(/\d+$/, String(i.parentId ?? i.relatedTo))}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      {i.parentId ?? i.relatedTo}
-                    </a>
-                  </td>
-                )}
+                <td className="dp-num">{i.childCount || "—"}</td>
+                <td className="dp-num">
+                  {(i.parentId ?? i.relatedTo) === undefined ? (
+                    "—"
+                  ) : (
+                    <>
+                      {i.via && (
+                        <span className="dp-muted">{t.via[i.via]} </span>
+                      )}
+                      <a
+                        className="dp-link"
+                        href={i.url.replace(
+                          /\d+$/,
+                          String(i.parentId ?? i.relatedTo),
+                        )}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {i.parentId ?? i.relatedTo}
+                      </a>
+                    </>
+                  )}
+                </td>
                 <td className="dp-num">{date(i.created)}</td>
                 <td className="dp-num">{date(i.closed)}</td>
                 <td className="dp-num dp-strong">{fmt(i.leadDays)}</td>
@@ -242,7 +352,10 @@ function ItemTable({ items, role, t }: { items: Item[]; role: Role; t: Strings }
         </table>
       </div>
       {rows.length > limit && (
-        <button className="dp-button" onClick={() => setLimit((l) => l + PAGE_SIZE)}>
+        <button
+          className="dp-button"
+          onClick={() => setLimit((l) => l + PAGE_SIZE)}
+        >
           {t.showMore}
         </button>
       )}
@@ -250,7 +363,13 @@ function ItemTable({ items, role, t }: { items: Item[]; role: Role; t: Strings }
   );
 }
 
-function OpenParentTable({ parents, t }: { parents: OpenParent[]; t: Strings }) {
+function OpenParentTable({
+  parents,
+  t,
+}: {
+  parents: OpenParent[];
+  t: Strings;
+}) {
   const [limit, setLimit] = React.useState(PAGE_SIZE);
   if (parents.length === 0) return null;
   const date = (ms: number) => new Date(ms).toLocaleDateString(t.locale);
@@ -277,7 +396,12 @@ function OpenParentTable({ parents, t }: { parents: OpenParent[]; t: Strings }) 
               <tr key={p.id}>
                 <td className="dp-num">{p.id}</td>
                 <td className="dp-title">
-                  <a className="dp-link" href={p.url} target="_blank" rel="noopener noreferrer">
+                  <a
+                    className="dp-link"
+                    href={p.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
                     {p.title}
                   </a>
                 </td>
@@ -286,14 +410,19 @@ function OpenParentTable({ parents, t }: { parents: OpenParent[]; t: Strings }) 
                 <td>{p.assignee ?? "—"}</td>
                 <td className="dp-num">{p.closedChildren}</td>
                 <td className="dp-num">{date(p.created)}</td>
-                <td className="dp-num dp-strong">{formatDays(p.ageDays, t.units, t.locale)}</td>
+                <td className="dp-num dp-strong">
+                  {formatDays(p.ageDays, t.units, t.locale)}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
       {parents.length > limit && (
-        <button className="dp-button" onClick={() => setLimit((l) => l + PAGE_SIZE)}>
+        <button
+          className="dp-button"
+          onClick={() => setLimit((l) => l + PAGE_SIZE)}
+        >
           {t.showMore}
         </button>
       )}
@@ -301,15 +430,29 @@ function OpenParentTable({ parents, t }: { parents: OpenParent[]; t: Strings }) 
   );
 }
 
-function App({ source, mock, t }: { source: DataSource; mock: boolean; t: Strings }) {
-  const [from, setFrom] = React.useState(() => toDateInput(Date.now() - DEFAULT_DAYS * DAY_MS));
+function App({
+  source,
+  mock,
+  t,
+}: {
+  source: DataSource;
+  mock: boolean;
+  t: Strings;
+}) {
+  const [from, setFrom] = React.useState(() =>
+    toDateInput(Date.now() - DEFAULT_DAYS * DAY_MS),
+  );
   const [to, setTo] = React.useState(() => toDateInput(Date.now()));
   const [data, setData] = React.useState<PulseData>();
+  const [report, setReport] = React.useState<ReportData>();
+  const [reportError, setReportError] = React.useState<string>();
   const [error, setError] = React.useState<string>();
   const [loading, setLoading] = React.useState(true);
-  const [role, setRole] = React.useState<Role>("parent");
   const [type, setType] = React.useState("");
-  const [related, setRelated] = React.useState(true);
+  /** İptal durumundaki kayıtlar sayılara, sürelere ve listeye girmesin. */
+  const [noCancelled, setNoCancelled] = React.useState(false);
+  /** Listede gösterilen grup; boşsa aralıkta kapanan tüm kayıtlar. */
+  const [flow, setFlow] = React.useState<Flow | "">("");
   const [reload, setReload] = React.useState(0);
   const first = React.useRef(true);
 
@@ -318,15 +461,31 @@ function App({ source, mock, t }: { source: DataSource; mock: boolean; t: String
     const timer = window.setTimeout(
       () => {
         setLoading(true);
+        // Aralıkta açılan / kapanan sayıları ayrı okunur; okunamazsa sayfanın geri kalanı yine gösterilir.
+        source.loadReport({ from, to, related: true }).then(
+          (r) => {
+            if (cancelled) return;
+            setReport(r);
+            setReportError(undefined);
+          },
+          (e) => {
+            if (cancelled) return;
+            setReport(undefined);
+            setReportError(e instanceof Error ? e.message : String(e));
+          },
+        );
         source
-          .load({ from, to, related })
+          // Related ve Tested By bağlantıları her zaman izlenir.
+          .load({ from, to, related: true })
           .then(
             (d) => {
               if (cancelled) return;
               setData(d);
               setError(undefined);
             },
-            (e) => !cancelled && setError(e instanceof Error ? e.message : String(e)),
+            (e) =>
+              !cancelled &&
+              setError(e instanceof Error ? e.message : String(e)),
           )
           .then(() => !cancelled && setLoading(false));
       },
@@ -337,46 +496,99 @@ function App({ source, mock, t }: { source: DataSource; mock: boolean; t: String
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [source, from, to, related, reload]);
+  }, [source, from, to, reload]);
 
-  const all = data?.items ?? [];
-  const types = React.useMemo(() => [...new Set(all.map((i) => i.type))].sort(), [all]);
-  const typed = React.useMemo(() => (type && types.includes(type) ? all.filter((i) => i.type === type) : all), [all, type, types]);
-  const groups = React.useMemo(
-    () => Object.fromEntries(ROLES.map((r) => [r, typed.filter((i) => hasRole(i, r))])) as Record<Role, Item[]>,
-    [typed],
+  const keep = (i: ListItem) => !noCancelled || !isCancelled(i);
+  const all = React.useMemo(() => (data?.items ?? []).filter(keep), [data, noCancelled]);
+  // Yalnızca açık kaydı olan tipler de süzgeçte yer alır.
+  const types = React.useMemo(
+    () =>
+      [
+        ...new Set([
+          ...all.map((i) => i.type),
+          ...(report?.rows ?? []).map((r) => r.type),
+        ]),
+      ]
+        .filter(Boolean)
+        .sort(),
+    [all, report],
   );
-  const items = groups[role];
+  const typed = <T extends ListItem>(list: T[]) =>
+    type && types.includes(type) ? list.filter((i) => i.type === type) : list;
+  const closedAll = React.useMemo(() => typed(all), [all, type, types]);
+  const flowItems = React.useMemo(
+    () => typed((report?.items ?? []).filter(keep)),
+    [report, type, types, noCancelled],
+  );
+  const shown = flow && report ? flow : "";
+  const items: ListItem[] = React.useMemo(
+    () => (shown ? flowItems.filter((i) => i.flow === shown) : closedAll),
+    [shown, flowItems, closedAll],
+  );
+  // Süre istatistikleri yalnızca kapanmış kayıtlardan hesaplanır.
+  const closed = React.useMemo(
+    () =>
+      items.filter(
+        (i): i is Item => i.closed !== undefined && i.leadDays !== undefined,
+      ),
+    [items],
+  );
   // Açık parent'ların child'ları tür süzgecinden geçmiş listeden sayılır; child'ı kalmayan gösterilmez.
   const openParents = React.useMemo(() => {
     const counts = new Map<number, number>();
-    for (const i of typed) if (i.parentId) counts.set(i.parentId, (counts.get(i.parentId) ?? 0) + 1);
+    for (const i of closedAll)
+      if (i.parentId) counts.set(i.parentId, (counts.get(i.parentId) ?? 0) + 1);
     return (data?.openParents ?? [])
       .map((p) => ({ ...p, closedChildren: counts.get(p.id) ?? 0 }))
       .filter((p) => p.closedChildren > 0);
-  }, [data, typed]);
-  const showOpen = role === "parent" && openParents.length > 0;
-  const lead = leadStats(items);
-  const cycle = cycleStats(items);
+  }, [data, closedAll]);
+  const showOpen = !shown && openParents.length > 0;
+  const flowCount = (f: Flow) => flowItems.filter((i) => i.flow === f).length;
+  const lead = leadStats(closed);
+  const cycle = cycleStats(closed);
   const fmt = (d?: number) => formatDays(d, t.units, t.locale);
 
   return (
     <Page className="dp-page">
-      <Header title={t.title} titleSize={TitleSize.Large} description={t.subtitle(data?.project)} />
+      <Header
+        title={t.title}
+        titleSize={TitleSize.Large}
+        description={t.subtitle(data?.project)}
+      />
       <div className="dp-content">
-        {mock && <MessageCard severity={MessageCardSeverity.Info}>{t.mock}</MessageCard>}
+        {mock && (
+          <MessageCard severity={MessageCardSeverity.Info}>
+            {t.mock}
+          </MessageCard>
+        )}
         <div className="dp-toolbar">
           <label className="dp-field">
             <span className="dp-muted">{t.from}</span>
-            <input className="dp-input" type="date" value={from} max={to} onChange={(e) => e.target.value && setFrom(e.target.value)} />
+            <input
+              className="dp-input"
+              type="date"
+              value={from}
+              max={to}
+              onChange={(e) => e.target.value && setFrom(e.target.value)}
+            />
           </label>
           <label className="dp-field">
             <span className="dp-muted">{t.to}</span>
-            <input className="dp-input" type="date" value={to} min={from} onChange={(e) => e.target.value && setTo(e.target.value)} />
+            <input
+              className="dp-input"
+              type="date"
+              value={to}
+              min={from}
+              onChange={(e) => e.target.value && setTo(e.target.value)}
+            />
           </label>
           <label className="dp-field">
             <span className="dp-muted">{t.col.type}</span>
-            <select className="dp-input" value={types.includes(type) ? type : ""} onChange={(e) => setType(e.target.value)}>
+            <select
+              className="dp-input"
+              value={types.includes(type) ? type : ""}
+              onChange={(e) => setType(e.target.value)}
+            >
               <option value="">{t.allTypes}</option>
               {types.map((x) => (
                 <option key={x} value={x}>
@@ -385,18 +597,50 @@ function App({ source, mock, t }: { source: DataSource; mock: boolean; t: String
               ))}
             </select>
           </label>
-          <label className="dp-check" title={t.relatedHint}>
-            <input type="checkbox" checked={related} onChange={(e) => setRelated(e.target.checked)} />
-            {t.related}
+          <label className="dp-field">
+            <span className="dp-muted">{t.show}</span>
+            <select
+              className="dp-input"
+              value={shown}
+              disabled={!report}
+              onChange={(e) => setFlow(e.target.value as Flow | "")}
+            >
+              <option value="">{t.closedAll}</option>
+              {FLOWS.map((f) => (
+                <option key={f} value={f}>
+                  {t.w[f]}
+                </option>
+              ))}
+            </select>
           </label>
-          <button className="dp-button" disabled={loading} onClick={() => setReload((n) => n + 1)}>
+          <label className="dp-check" title={t.noCancelledHint}>
+            <input type="checkbox" checked={noCancelled} onChange={(e) => setNoCancelled(e.target.checked)} />
+            {t.noCancelled}
+          </label>
+          <button
+            className="dp-button"
+            disabled={loading}
+            onClick={() => setReload((n) => n + 1)}
+          >
             {loading ? t.loading : t.refresh}
           </button>
         </div>
 
-        {error && <MessageCard severity={MessageCardSeverity.Error}>{t.loadError(error)}</MessageCard>}
-        {data?.truncated && <MessageCard severity={MessageCardSeverity.Warning}>{t.truncated}</MessageCard>}
-        {data?.warnings.map((w) => (
+        {error && (
+          <MessageCard severity={MessageCardSeverity.Error}>
+            {t.loadError(error)}
+          </MessageCard>
+        )}
+        {(data?.truncated || report?.truncated) && (
+          <MessageCard severity={MessageCardSeverity.Warning}>
+            {t.truncated}
+          </MessageCard>
+        )}
+        {[
+          ...(data?.warnings ?? []),
+          ...(report?.warnings ?? []),
+          ...(reportError ? [`report: ${reportError}`] : []),
+        ].map((w) => (
           <MessageCard key={w} severity={MessageCardSeverity.Warning}>
             {t.warning(w)}
           </MessageCard>
@@ -404,53 +648,95 @@ function App({ source, mock, t }: { source: DataSource; mock: boolean; t: String
 
         {data && (
           <>
-            <div className="dp-tabs" role="tablist">
-              {ROLES.map((r) => {
-                const s = leadStats(groups[r]);
-                return (
-                  <button
-                    key={r}
-                    role="tab"
-                    aria-selected={r === role}
-                    className={`dp-tab${r === role ? " dp-tab-active" : ""}`}
-                    onClick={() => setRole(r)}
-                  >
-                    <span className="dp-tab-title">{t.roles[r]}</span>
-                    <span className="dp-tab-label">
-                      {groups[r].length} · {t.medianShort} {fmt(s?.median)}
-                      {r === "parent" && openParents.length > 0 ? ` · ${t.openCount(openParents.length)}` : ""}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            <div className="dp-muted">{t.roleHints[role]}</div>
-
-            {role === "parent" && data.parentsOutOfRange > 0 && (
-              <div className="dp-muted">{t.parentsOutOfRange(data.parentsOutOfRange)}</div>
+            {report && (
+              <section>
+                <h3 className="dp-h">{t.flowTitle}</h3>
+                <div className="dp-muted">{t.flowHint}</div>
+                <div className="dp-cards">
+                  {FLOWS.map((f) => (
+                    <Card
+                      key={f}
+                      label={t.w[f]}
+                      value={String(flowCount(f))}
+                      hint={t.w[`${f}Hint` as const]}
+                      active={shown === f}
+                      onClick={() => setFlow(shown === f ? "" : f)}
+                    />
+                  ))}
+                </div>
+              </section>
+            )}
+            {!shown && data.parentsOutOfRange > 0 && (
+              <div className="dp-muted">
+                {t.parentsOutOfRange(data.parentsOutOfRange)}
+              </div>
             )}
             {items.length === 0 ? (
-              !showOpen && <div className="dp-empty">{t.empty}</div>
+              !showOpen && (
+                <div className="dp-empty">{shown ? t.emptyList : t.empty}</div>
+              )
             ) : (
               <>
-                <div className="dp-cards">
-                  <Card label={t.count} value={String(items.length)} />
-                  <Card label={t.median} value={fmt(lead?.median)} hint={t.leadHint} />
-                  <Card label={t.avg} value={fmt(lead?.avg)} hint={t.leadHint} />
-                  <Card label={t.p85} value={fmt(lead?.p85)} hint={t.p85Hint} />
-                  <Card label={t.cycle} value={fmt(cycle?.median)} hint={t.cycleHint} />
-                </div>
-                <WeeklyChart items={items} t={t} />
-                <GroupTable items={items} t={t} title={t.byTypeTitle} label={t.col.type} group={(i) => i.type} />
-                {new Set(items.map((i) => i.project)).size > 1 && (
-                  <GroupTable items={items} t={t} title={t.byProjectTitle} label={t.col.project} group={(i) => i.project} />
+                <h3 className="dp-h">
+                  {shown ? `${t.w[shown]} (${items.length})` : t.closedTitle}
+                </h3>
+                {closed.length > 0 && (
+                  <>
+                    <div className="dp-cards">
+                      <Card label={t.count} value={String(closed.length)} />
+                      <Card
+                        label={t.median}
+                        value={fmt(lead?.median)}
+                        hint={t.leadHint}
+                      />
+                      <Card
+                        label={t.avg}
+                        value={fmt(lead?.avg)}
+                        hint={t.leadHint}
+                      />
+                      <Card
+                        label={t.p85}
+                        value={fmt(lead?.p85)}
+                        hint={t.p85Hint}
+                      />
+                      <Card
+                        label={t.cycle}
+                        value={fmt(cycle?.median)}
+                        hint={t.cycleHint}
+                      />
+                    </div>
+                    <WeeklyChart items={closed} t={t} />
+                    <GroupTable
+                      items={closed}
+                      t={t}
+                      title={t.byTypeTitle}
+                      label={t.col.type}
+                      group={(i) => i.type}
+                    />
+                    {new Set(closed.map((i) => i.project)).size > 1 && (
+                      <GroupTable
+                        items={closed}
+                        t={t}
+                        title={t.byProjectTitle}
+                        label={t.col.project}
+                        group={(i) => i.project}
+                      />
+                    )}
+                  </>
                 )}
-                {/* key: sekme değişince arama, sıralama ve sayfa sıfırlanır. */}
-                <ItemTable key={role} items={items} role={role} t={t} />
+                {/* key: grup değişince arama, sıralama ve sayfa sıfırlanır. */}
+                <ItemTable
+                  key={shown}
+                  items={items}
+                  name={shown || "closed"}
+                  t={t}
+                />
               </>
             )}
             {showOpen && <OpenParentTable parents={openParents} t={t} />}
-            <div className="dp-muted">{t.closedStates(data.closedStates.join(", "))}</div>
+            <div className="dp-muted">
+              {t.closedStates(data.closedStates.join(", "))}
+            </div>
           </>
         )}
         {!data && loading && <div className="dp-empty">{t.loading}</div>}
@@ -459,22 +745,36 @@ function App({ source, mock, t }: { source: DataSource; mock: boolean; t: String
   );
 }
 
-function render(source: DataSource, mock: boolean, culture: string | undefined) {
+function render(
+  source: DataSource,
+  mock: boolean,
+  culture: string | undefined,
+) {
   const lang = pickLang(culture);
   document.documentElement.lang = lang;
-  ReactDOM.render(<App source={source} mock={mock} t={STRINGS[lang]} />, document.getElementById("root"));
+  ReactDOM.render(
+    <App source={source} mock={mock} t={STRINGS[lang]} />,
+    document.getElementById("root"),
+  );
 }
 
 async function start() {
   // Azure DevOps dışında (npm run dev) açıldıysa örnek veriyle çalış; dil ?lang=tr|en ile seçilebilir.
   if (window.self === window.top) {
-    render(mockSource, true, new URLSearchParams(window.location.search).get("lang") ?? navigator.language);
+    render(
+      mockSource,
+      true,
+      new URLSearchParams(window.location.search).get("lang") ??
+        navigator.language,
+    );
     return;
   }
   await SDK.init({ loaded: false, applyTheme: true });
   await SDK.ready();
   try {
-    const location = await SDK.getService<ILocationService>(CommonServiceIds.LocationService);
+    const location = await SDK.getService<ILocationService>(
+      CommonServiceIds.LocationService,
+    );
     const baseUrl = await location.getServiceLocation();
     // Azure DevOps Server 2022'de getPageContext() hata fırlatır; sırayla sayfa diline ve tarayıcı diline düşülür.
     const culture = firstOf([
@@ -483,11 +783,17 @@ async function start() {
       () => navigator.language,
     ]);
     // Proje okunamazsa tüm collection sorgulanır.
-    const project = await SDK.getService<IProjectPageService>(CommonServiceIds.ProjectPageService)
+    const project = await SDK.getService<IProjectPageService>(
+      CommonServiceIds.ProjectPageService,
+    )
       .then((s) => s.getProject())
       .then((p) => p?.name)
       .catch(() => undefined);
-    render(createRestSource(baseUrl, () => SDK.getAccessToken(), project), false, culture);
+    render(
+      createRestSource(baseUrl, () => SDK.getAccessToken(), project),
+      false,
+      culture,
+    );
     await SDK.notifyLoadSucceeded();
   } catch (e) {
     await SDK.notifyLoadFailed(e instanceof Error ? e : String(e));

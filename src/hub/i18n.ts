@@ -1,4 +1,4 @@
-import { Role, Via } from "./logic";
+import { Via } from "./logic";
 
 export type Lang = "tr" | "en";
 
@@ -29,16 +29,13 @@ export interface Strings {
   from: string;
   to: string;
   refresh: string;
-  related: string;
-  relatedHint: string;
+  noCancelled: string;
+  noCancelledHint: string;
   via: Record<Via, string>;
   loading: string;
   loadError: (detail: string) => string;
   truncated: string;
   warning: (detail: string) => string;
-  roles: Record<Role, string>;
-  roleHints: Record<Role, string>;
-  medianShort: string;
   count: string;
   avg: string;
   median: string;
@@ -52,6 +49,12 @@ export interface Strings {
   byTypeTitle: string;
   byProjectTitle: string;
   itemsTitle: string;
+  flowTitle: string;
+  flowHint: string;
+  show: string;
+  closedAll: string;
+  emptyList: string;
+  closedTitle: string;
   search: string;
   allTypes: string;
   empty: string;
@@ -73,7 +76,6 @@ export interface Strings {
     parent: string;
   };
   closedStates: (names: string) => string;
-  openCount: (n: number) => string;
   openParentsTitle: (n: number) => string;
   openParentsHint: string;
   parentsOutOfRange: (n: number) => string;
@@ -94,8 +96,8 @@ export interface Strings {
     stillOpenHint: string;
     closedOlder: string;
     closedOlderHint: string;
-    median: string;
-    medianHint: string;
+    avg: string;
+    avgHint: string;
     noData: string;
     truncated: string;
     invalidRange: string;
@@ -103,6 +105,8 @@ export interface Strings {
     cfgTypes: string;
     allTypes: string;
     typesError: string;
+    back: string;
+    showItems: string;
   };
 }
 
@@ -112,24 +116,16 @@ const tr: Strings = {
   title: "Delivery Pulse",
   subtitle: (p) => (p ? `${p} — work item teslim süreleri` : "Tüm projeler — work item teslim süreleri"),
   mock: "Örnek veri gösteriliyor (Azure DevOps dışında açıldı).",
-  from: "Kapanış başlangıcı",
-  to: "Kapanış bitişi",
+  from: "Başlangıç",
+  to: "Bitiş",
   refresh: "Yenile",
-  related: "Related ve Tested By bağlantılarını da izle",
-  relatedHint:
-    "Açıkken Related ya da Tested By bağlantısıyla bağlı kayıtlar (örn. test kartları) da child gibi sayılır; Parent sütununda bağlantı türüyle gösterilir.",
+  noCancelled: "İptal edilenleri hariç tut",
+  noCancelledHint: "Açıkken İptal durumundaki kartlar sayılara, sürelere ve listeye girmez.",
   via: { related: "Related", tested: "Tested By" },
   loading: "Yükleniyor…",
   loadError: (d) => `Veriler okunamadı: ${d}`,
-  truncated: "Sunucu sınırı nedeniyle liste kesildi; sonuçlar eksik olabilir. Tarih aralığını daraltın.",
+  truncated: "Kayıt sayısı okunabilecek üst sınırı aştı; sonuçlar eksik olabilir. Tarih aralığını daraltın.",
   warning: (d) => `Bir sorgu başarısız oldu, sonuçlar yaklaşık olabilir (${d}).`,
-  roles: { parent: "Parent'lar", child: "Child'lar", standalone: "Bağımsız" },
-  roleHints: {
-    parent: "En az bir child'ı olan work item'lar. Süre parent'ın kendi açılış–kapanış süresidir.",
-    child: "Bu projedeki kayıtların altındaki tüm seviyeler (child, child'ın child'ı; hangi projede olursa olsun) ve bu projede kapanan, bir parent'a bağlı kayıtlar. Hem parent'ı hem child'ı olan kayıtlar iki listede de yer alır.",
-    standalone: "Parent'ı da child'ı da olmayan work item'lar.",
-  },
-  medianShort: "medyan",
   count: "Kapanan",
   avg: "Ortalama lead time",
   median: "Medyan lead time",
@@ -143,6 +139,12 @@ const tr: Strings = {
   byTypeTitle: "Türe göre",
   byProjectTitle: "Projeye göre",
   itemsTitle: "Work item'lar",
+  flowTitle: "Seçilen aralıkta açılan ve kapanan kayıtlar",
+  flowHint: "Bir karta tıklayınca aşağıda yalnızca o kayıtlar listelenir; yeniden tıklayınca seçim kalkar.",
+  show: "Gösterilen",
+  closedAll: "Aralıkta kapananlar",
+  emptyList: "Bu grupta kayıt yok.",
+  closedTitle: "Kapanan kayıtların süreleri",
   search: "Ara: id, başlık, kişi, proje",
   allTypes: "Tüm türler",
   empty: "Bu aralıkta kapanan kayıt yok.",
@@ -164,7 +166,6 @@ const tr: Strings = {
     parent: "Parent",
   },
   closedStates: (n) => `Kapalı sayılan durumlar: ${n}`,
-  openCount: (n) => `${n} açık`,
   openParentsTitle: (n) => `Hâlâ açık parent'lar (${n})`,
   openParentsHint:
     "Child'ları bu aralıkta kapanmış ama kendisi kapalı sayılan bir durumda olmayan parent'lar. Kapanmadıkları için lead time'ları yoktur ve yukarıdaki istatistiklere girmezler.",
@@ -185,14 +186,16 @@ const tr: Strings = {
     stillOpenHint: "Aralıkta açılan ve aralık sonunda kapanmamış olan",
     closedOlder: "Önceden açılıp kapanan",
     closedOlderHint: "Aralıktan önce açılıp aralıkta kapanan",
-    median: "Medyan lead time",
-    medianHint: "Aralıkta kapananların açılıştan kapanışa süresi",
+    avg: "Ortalama lead time",
+    avgHint: "Aralıkta açılıp aralıkta kapananların açılıştan kapanışa süresi",
     noData: "Bu aralıkta açılan ya da kapanan kayıt yok.",
-    truncated: "Sunucu sınırı nedeniyle sayılar eksik olabilir; aralığı daraltın.",
+    truncated: "Kayıt sayısı okunabilecek üst sınırı aştı; sayılar eksik olabilir. Aralığı daraltın.",
     invalidRange: "Ayarlardan geçerli bir tarih aralığı seçin.",
     cfgPeriod: "Tarih aralığı",
     cfgTypes: "Kart tipi",
     allTypes: "Tümü (All)",
+    back: "‹ Geri",
+    showItems: "Kayıtları göster",
     typesError: "Kart tipleri okunamadı. Tipleri virgülle ayırarak yazın; boş bırakılırsa hepsi sayılır.",
   },
 };
@@ -203,23 +206,16 @@ const en: Strings = {
   title: "Delivery Pulse",
   subtitle: (p) => (p ? `${p} — work item delivery times` : "All projects — work item delivery times"),
   mock: "Showing sample data (opened outside Azure DevOps).",
-  from: "Closed from",
-  to: "Closed to",
+  from: "From",
+  to: "To",
   refresh: "Refresh",
-  related: "Follow Related and Tested By links",
-  relatedHint: "When on, items linked with a Related or Tested By link (e.g. test cases) are counted like children; the Parent column shows the link type.",
+  noCancelled: "Exclude cancelled",
+  noCancelledHint: "When on, items in the İptal (cancelled) state are left out of the counts, times and list.",
   via: { related: "Related", tested: "Tested By" },
   loading: "Loading…",
   loadError: (d) => `Could not load data: ${d}`,
-  truncated: "The list was cut off by the server limit; results may be incomplete. Narrow the date range.",
+  truncated: "There are more items than can be read at once; results may be incomplete. Narrow the date range.",
   warning: (d) => `A query failed, results may be approximate (${d}).`,
-  roles: { parent: "Parents", child: "Children", standalone: "Standalone" },
-  roleHints: {
-    parent: "Work items with at least one child. The time is the parent's own creation-to-closure time.",
-    child: "Every level below this project's items (children, their children; wherever they live), plus items closed in this project that have a parent. Items that have both a parent and children appear in both lists.",
-    standalone: "Work items with neither a parent nor children.",
-  },
-  medianShort: "median",
   count: "Closed",
   avg: "Average lead time",
   median: "Median lead time",
@@ -233,6 +229,12 @@ const en: Strings = {
   byTypeTitle: "By type",
   byProjectTitle: "By project",
   itemsTitle: "Work items",
+  flowTitle: "Items opened and closed in the selected range",
+  flowHint: "Click a card to list only those items below; click again to clear.",
+  show: "Show",
+  closedAll: "Closed in range",
+  emptyList: "No items in this group.",
+  closedTitle: "Times of the closed items",
   search: "Search: id, title, person, project",
   allTypes: "All types",
   empty: "No items closed in this range.",
@@ -254,7 +256,6 @@ const en: Strings = {
     parent: "Parent",
   },
   closedStates: (n) => `States counted as closed: ${n}`,
-  openCount: (n) => `${n} open`,
   openParentsTitle: (n) => `Parents still open (${n})`,
   openParentsHint:
     "Parents whose children closed in this range but which are not in a closed state themselves. They have no lead time yet and are not part of the statistics above.",
@@ -275,14 +276,16 @@ const en: Strings = {
     stillOpenHint: "Opened in the range and not closed by the end of it",
     closedOlder: "Opened earlier, closed",
     closedOlderHint: "Opened before the range and closed in the range",
-    median: "Median lead time",
-    medianHint: "Creation to closure, for items closed in the range",
+    avg: "Average lead time",
+    avgHint: "Creation to closure, for items opened and closed in the range",
     noData: "No items opened or closed in this range.",
-    truncated: "Counts may be incomplete because of the server limit; narrow the range.",
+    truncated: "More items than can be read at once; counts may be incomplete. Narrow the range.",
     invalidRange: "Pick a valid date range in the settings.",
     cfgPeriod: "Date range",
     cfgTypes: "Work item type",
     allTypes: "All",
+    back: "‹ Back",
+    showItems: "Show the items",
     typesError: "Could not read the work item types. Type them separated by commas; leave empty for all.",
   },
 };

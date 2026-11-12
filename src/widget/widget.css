@@ -116,6 +116,76 @@ body {
   font-weight: 600;
 }
 
+/* Tıklanabilir sayılar ve kayıt listesi */
+.dpw-count,
+.dpw-back {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--communication-foreground, #0078d4);
+  font: inherit;
+  cursor: pointer;
+}
+
+.dpw-count:hover,
+.dpw-back:hover,
+.dpw-name a:hover {
+  text-decoration: underline;
+}
+
+.dpw-count:focus-visible,
+.dpw-back:focus-visible {
+  outline: 2px solid var(--communication-foreground, #0078d4);
+  outline-offset: 1px;
+}
+
+.dpw-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.dpw-back {
+  flex: none;
+}
+
+.dpw-picked {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dpw-list {
+  table-layout: fixed;
+}
+
+.dpw-list th:first-child {
+  width: 56px;
+}
+
+.dpw-list th:nth-child(3),
+.dpw-list th:nth-child(4) {
+  width: 76px;
+}
+
+.dpw-list th:nth-child(2) {
+  text-align: left;
+}
+
+.dpw-table td.dpw-name {
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dpw-name a {
+  color: var(--communication-foreground, #0078d4);
+  text-decoration: none;
+}
+
 /* İki sütun genişliğindeki widget'ta medyan sütunu sığmaz. */
 @media (max-width: 400px) {
   .dpw-extra {

@@ -8,6 +8,7 @@ import {
   formatDays,
   groupStats,
   hasRole,
+  isCancelled,
   isClosedRaw,
   inRange,
   itemsWiql,
@@ -15,6 +16,7 @@ import {
   missingParentIds,
   percentile,
   reportWiql,
+  splitRange,
   splitParents,
   stats,
   exportRows,
@@ -320,10 +322,21 @@ describe("rapor", () => {
       opts,
     );
     expect(report.rows).toEqual([
-      { type: "Dev", openedClosed: 1, stillOpen: 2, closedOlder: 1, median: 15 },
-      { type: "Bug", openedClosed: 1, stillOpen: 0, closedOlder: 0, median: 0 },
+      { type: "Dev", openedClosed: 1, stillOpen: 2, closedOlder: 1, avg: 10, median: 10 }, // önceden açılan (20 gün) medyana girmez
+      { type: "Bug", openedClosed: 1, stillOpen: 0, closedOlder: 0, avg: 0, median: 0 },
     ]);
-    expect(report.total).toEqual({ type: "", openedClosed: 2, stillOpen: 2, closedOlder: 1, median: 10 });
+    expect(report.total).toEqual({ type: "", openedClosed: 2, stillOpen: 2, closedOlder: 1, avg: 5, median: 5 });
+    // Sayılan kayıtlar gruplarıyla döner; aralık sonunda açık olanın kapanışı ve lead time'ı boştur.
+    expect(report.items.map((i) => [i.id, i.flow])).toEqual([
+      [1, "openedClosed"],
+      [2, "stillOpen"],
+      [3, "stillOpen"],
+      [4, "closedOlder"],
+      [5, "openedClosed"],
+    ]);
+    expect(report.items[2].closed).toBeUndefined();
+    expect(report.items[2].leadDays).toBeUndefined();
+    expect(report.items[0].leadDays).toBe(10);
   });
 
   it("seçilen kart tiplerini sayar; toplam da onlara göredir", () => {
@@ -334,7 +347,7 @@ describe("rapor", () => {
     ];
     const report = buildReport(data, states, { ...opts, types: ["dev", " HOTFIX "] });
     expect(report.rows.map((r) => r.type).sort()).toEqual(["Dev", "HotFix"]);
-    expect(report.total).toEqual({ type: "", openedClosed: 1, stillOpen: 1, closedOlder: 0, median: 10 });
+    expect(report.total).toEqual({ type: "", openedClosed: 1, stillOpen: 1, closedOlder: 0, avg: 10, median: 10 });
     expect(buildReport(data, states, { ...opts, types: [] }).rows.length).toBe(3);
   });
 
@@ -354,5 +367,23 @@ describe("rapor", () => {
     expect(childLinksWiql(o, now, { ids: [1] }, false, "created")).toContain("Target.[System.CreatedDate] <= @Today - 281");
     expect(childLinksWiql(o, now, { ids: [1] }, false, "created")).not.toContain("StateChangeDate");
     expect(childLinksWiql(o, now, { ids: [1] }, false, "either")).toContain(") OR (Target.[Microsoft.VSTS.Common.StateChangeDate] >= @Today - 314");
+  });
+
+  it("aralığı gün sınırından ikiye böler; tek gün bölünmez", () => {
+    expect(splitRange({ from: "2026-01-01", to: "2026-02-01" })).toEqual([
+      { from: "2026-01-01", to: "2026-01-16" },
+      { from: "2026-01-17", to: "2026-02-01" },
+    ]);
+    expect(splitRange({ from: "2026-03-28", to: "2026-03-29" })).toEqual([
+      { from: "2026-03-28", to: "2026-03-28" },
+      { from: "2026-03-29", to: "2026-03-29" },
+    ]);
+    expect(splitRange({ from: "2026-01-01", to: "2026-01-01" })).toBeUndefined();
+    expect(splitRange({ from: "", to: "2026-01-01" })).toBeUndefined();
+  });
+
+  it("iptal durumunu büyük/küçük harf ayırmadan tanır", () => {
+    expect(["İptal", "iptal", "IPTAL", "İPTAL"].every((state) => isCancelled({ state }))).toBe(true);
+    expect(isCancelled({ state: "Closed" })).toBe(false);
   });
 });

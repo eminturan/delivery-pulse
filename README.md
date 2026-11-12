@@ -6,27 +6,21 @@ A delivery speed dashboard for Azure DevOps Server 2022: it measures the **time 
 
 ## What it shows
 
-A **Delivery Pulse** page under Boards lists the work items of the current project that were closed in the selected date range (last 90 days by default), in three groups:
-
-| Group | Contents |
-| --- | --- |
-| **Parents** | Items with at least one child. The time is the parent's own creation-to-closure time. |
-| **Children** | Items linked to a parent. |
-| **Standalone** | Items with neither a parent nor children. |
-
-An item that has both a parent and children (e.g. a Feature under an Epic) is counted in both groups.
+A **Delivery Pulse** page under Boards lists the work items of the current project that were closed in the selected date range (last 90 days by default) in a single list. Each row shows its number of children (Children column) and the item it hangs under (Parent column), so parents, children and standalone items are told apart by those two columns.
 
 ### Parents in one project, children in others
 
-When the page is opened from the project that holds the parents, **children whose parent is in this project are read from whichever project they live in** and listed under Children with their project name (plus a "By project" breakdown). Lower levels are followed too (children of children, up to 5 levels). With "Follow Related and Tested By links" on, items linked with a Related or Tested By link (e.g. test cases) are counted like children, and the Parent column shows the link type. Each child is judged closed by its own project's closed states. Parents whose children have closed but which are still open themselves are listed under "Parents still open".
+When the page is opened from the project that holds the parents, **children whose parent is in this project are read from whichever project they live in** and listed with their project name (plus a "By project" breakdown). Lower levels are followed too (children of children, up to 5 levels). Items linked with a Related or Tested By link (e.g. test cases) are followed like children, and the Parent column shows the link type. Each child is judged closed by its own project's closed states. Parents whose children have closed but which are still open themselves are listed under "Parents still open".
 
 When the page is opened from a child project, it shows the items closed in that project; their parents are read even if they live elsewhere.
 
-For each group: number closed, median / average / 85th percentile lead time, median cycle time, a weekly median chart, a breakdown by type and a sortable item list.
+Above the list, three counters for the selected range: items opened and closed in it, items opened in it and still open, and items opened earlier and closed in it (the type filter applies). Clicking a counter, or picking it in the "Show" menu, lists only those items below, and the statistics and CSV export follow the selection; items still open have no closing date or lead time.
+
+For the list: number closed, median / average / 85th percentile lead time, median cycle time, a weekly median chart, a breakdown by type and a sortable item list.
 
 ## CSV export
 
-The **Export CSV** button above the item list downloads every row of the selected group (Parents / Children / Standalone) that passes the search and sort, not just the first 100 shown. The Turkish interface uses `;` as separator and `,` as decimal mark (what a Turkish Excel expects); the English interface uses `,` and `.`.
+The **Export CSV** button above the item list downloads every row that passes the search and sort, not just the first 100 shown. The Turkish interface uses `;` as separator and `,` as decimal mark (what a Turkish Excel expects); the English interface uses `,` and `.`.
 
 ## Dashboard widget
 
@@ -37,13 +31,17 @@ The **Export CSV** button above the item list downloads every row of the selecte
 | **Opened and closed** | Opened in the range and closed in the range |
 | **Still open** | Opened in the range and not closed by the end of it |
 | **Opened earlier, closed** | Opened before the range and closed in the range |
-| **Median lead time** | Creation to closure, for items closed in the range |
+| **Average lead time** | Creation to closure, for items opened and closed in the range |
 
 The widget can be 2–4 columns wide and 2–6 rows tall; about 9 work item types fit at two rows, the rest scroll inside the widget.
 
 An item closed after the range ended counts as open at the end of the range, so every item opened in the range is in one of the first two columns. Items opened before the range and still open are not part of the report.
 
-Settings: date range (last 30 / 90 / 180 / 365 days, or a custom from–to), work item type ("All" by default; pick one or more from the list and the total follows the selection), Related and Tested By. The scope matches the page: the items of the widget's project and everything below them, in whichever project.
+With "Exclude cancelled" on (page toolbar, widget settings), items in the İptal state are left out of the counts, times and lists.
+
+Clicking a number in the widget lists those items inside it (ID, title, created, closed; the title opens the work item); "Back" returns to the table.
+
+Settings: date range (last 30 / 90 / 180 / 365 days, or a custom from–to), work item type ("All" by default; pick one or more from the list and the total follows the selection). Related and Tested By links are always followed. The scope matches the page: the items of the widget's project and everything below them, in whichever project.
 
 ## How times are calculated
 
@@ -52,7 +50,7 @@ Settings: date range (last 30 / 90 / 180 / 365 days, or a custom from–to), wor
 - **Closed** = `Microsoft.VSTS.Common.ClosedDate`, falling back to `Microsoft.VSTS.Common.StateChangeDate`
 - **Closed states** = the states in the "Completed" category of the project's work item types (listed at the bottom of the page). If they cannot be read: `Closed`, `Done`, `Completed`, `Tamamlandı`. The `İptal` (cancelled) state always counts as closed, whatever its category: a cancelled item's process has ended too.
 - Times are calendar days; weekends and holidays are not subtracted.
-- At most 2000 work items from this project and 5000 from other projects are read per load; the page warns when a limit is hit.
+- A single server query returns at most 20000 rows. When a query reaches that, the date range is split in half and each half is queried again (down to single days), so wide ranges are still read completely. At most 50000 work items are read per load; the page warns only when that is exceeded or a single day still hits the query limit.
 
 ## Development
 

@@ -1,4 +1,4 @@
-import { DataSource, DAY_MS, inRange, Item } from "./logic";
+import { DataSource, DAY_MS, dayStart, inRange, Item, ListItem, summarize } from "./logic";
 
 const OPEN_PARENT_ID = 900;
 
@@ -17,7 +17,8 @@ function build(now: number): Item[] {
       id: ++id,
       title,
       type,
-      state: "Tamamlandı",
+      // Her yedinci kayıt iptal edilmiş: "İptal edilenleri hariç tut" seçeneği denenebilsin.
+      state: id % 7 === 6 ? "İptal" : "Tamamlandı",
       // Parent'lar tek projede, child'lar farklı projelerde.
       project: type === "Feature" ? "Talep Yönetimi" : ["Mobil", "Kredi", "Ödemeler"][Math.floor(rnd() * 3)],
       assignee: ["Ayşe Yılmaz", "Mehmet Demir", "Zeynep Kaya", "Can Öztürk"][Math.floor(rnd() * 4)],
@@ -55,21 +56,21 @@ function build(now: number): Item[] {
 export const mockSource: DataSource = {
   async loadReport(opts) {
     await new Promise((r) => setTimeout(r, 300));
+    const from = dayStart(opts.from);
+    const end = dayStart(opts.to) + DAY_MS;
     const wanted = (opts.types ?? []).map((s) => s.toLowerCase());
-    const rows = [
-      { type: "Development", openedClosed: 212, stillOpen: 64, closedOlder: 87, median: 17.6 },
-      { type: "Test Case", openedClosed: 95, stillOpen: 31, closedOlder: 12, median: 6.2 },
-      { type: "Talep", openedClosed: 38, stillOpen: 41, closedOlder: 29, median: 54.3 },
-      { type: "HotFix", openedClosed: 19, stillOpen: 2, closedOlder: 1, median: 1.5 },
-      { type: "Bug", openedClosed: 14, stillOpen: 9, closedOlder: 6, median: 4.8 },
-    ].filter((r) => wanted.length === 0 || wanted.includes(r.type.toLowerCase()));
-    const sum = (k: "openedClosed" | "stillOpen" | "closedOlder") => rows.reduce((n, r) => n + r[k], 0);
-    return {
-      rows,
-      total: { type: "", openedClosed: sum("openedClosed"), stillOpen: sum("stillOpen"), closedOlder: sum("closedOlder"), median: 14.9 },
-      truncated: false,
-      warnings: [],
-    };
+    const items: ListItem[] = [];
+    for (const i of build(Date.now())) {
+      if (wanted.length > 0 && !wanted.includes(i.type.toLowerCase())) continue;
+      const opened = i.created >= from && i.created < end;
+      const closed = i.closed >= from && i.closed < end;
+      if (opened && closed) items.push({ ...i, flow: "openedClosed" });
+      else if (closed) items.push({ ...i, flow: "closedOlder" });
+      // Her üçüncü kaydın açık bir eşi: aralıkta açılmış, henüz kapanmamış.
+      if (opened && i.id % 3 === 0)
+        items.push({ ...i, id: i.id + 5000, title: `${i.title} (devam ediyor)`, state: "Aktif", closed: undefined, leadDays: undefined, cycleDays: undefined, childCount: 0, flow: "stillOpen" });
+    }
+    return { ...summarize(items), items, truncated: false, warnings: [] };
   },
   async load(opts) {
     await new Promise((r) => setTimeout(r, 300));

@@ -1,8 +1,11 @@
 import * as React from "react";
 import { WidgetSettings } from "azure-devops-extension-api/Dashboard";
 
-import { dayStart, formatDays, ReportData, ReportRow } from "../hub/logic";
+import { dayStart, Flow, FLOWS, formatDays, isCancelled, ReportData, ReportRow, summarize } from "../hub/logic";
 import { Frame, parseSettings, resolveRange, selectedTypes, startWidget, SUMMARY_DEFAULTS, useEnv } from "./shared";
+
+/** Kayıt listesinde tek seferde gösterilen en fazla satır. */
+const LIST_LIMIT = 500;
 
 /** Kart tipine göre rapor: seçilen aralıkta açılan ve kapanan kayıt sayıları. */
 function Summary({ settings }: { settings?: WidgetSettings }) {
@@ -13,19 +16,28 @@ function Summary({ settings }: { settings?: WidgetSettings }) {
   const typeKey = types.join("|");
   const [data, setData] = React.useState<ReportData>();
   const [error, setError] = React.useState<string>();
+  /** Tıklanan sayı: hangi tip (boşsa toplam) ve hangi grup. Doluyken tablo yerine o kayıtlar listelenir. */
+  const [pick, setPick] = React.useState<{ type?: string; flow: Flow }>();
 
   React.useEffect(() => {
     if (!env || !range) return;
     let cancelled = false;
     setData(undefined);
-    env.source.loadReport({ ...range, related: cfg.related, types }).then(
-      (d) => !cancelled && (setData(d), setError(undefined)),
+    setPick(undefined);
+    env.source.loadReport({ ...range, related: true, types }).then(
+      (d) => {
+        if (cancelled) return;
+        // İptal edilenler hariç tutulacaksa sayılar kalan kayıtlardan yeniden hesaplanır.
+        const items = cfg.noCancelled ? d.items.filter((i) => !isCancelled(i)) : d.items;
+        setData(cfg.noCancelled ? { ...d, ...summarize(items), items } : d);
+        setError(undefined);
+      },
       (e) => !cancelled && setError(e instanceof Error ? e.message : String(e)),
     );
     return () => {
       cancelled = true;
     };
-  }, [env, range?.from, range?.to, cfg.related, typeKey]);
+  }, [env, range?.from, range?.to, typeKey, !!cfg.noCancelled]);
 
   const title = settings?.name || "Delivery Pulse";
   if (!env) return <Frame title={title} />;
@@ -36,6 +48,7 @@ function Summary({ settings }: { settings?: WidgetSettings }) {
     `${date(range.from)} – ${date(range.to)}`,
     cfg.period === "custom" ? "" : t.w.lastDays(Number(cfg.period)),
     types.join(", "),
+    cfg.noCancelled ? t.noCancelled : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -43,15 +56,71 @@ function Summary({ settings }: { settings?: WidgetSettings }) {
   if (!data) return <Frame title={title} sub={sub} message={t.loading} />;
   if (data.rows.length === 0) return <Frame title={title} sub={sub} message={t.w.noData} />;
 
+  if (pick) {
+    const items = data.items
+      .filter((i) => i.flow === pick.flow && (pick.type === undefined || i.type === pick.type))
+      .sort((a, b) => b.created - a.created);
+    const day = (ms?: number) => (ms === undefined ? "—" : new Date(ms).toLocaleDateString(t.locale));
+    return (
+      <Frame title={title} sub={sub}>
+        <div className="dpw-bar">
+          <button className="dpw-back" onClick={() => setPick(undefined)}>
+            {t.w.back}
+          </button>
+          <span className="dpw-picked" title={t.w[`${pick.flow}Hint` as const]}>
+            {[pick.type ?? t.w.total, t.w[pick.flow]].join(" · ")} ({items.length})
+          </span>
+        </div>
+        <div className="dpw-scroll">
+          <table className="dpw-table dpw-list">
+            <thead>
+              <tr>
+                <th scope="col">{t.col.id}</th>
+                <th scope="col">{t.col.title}</th>
+                <th scope="col">{t.col.created}</th>
+                <th scope="col" className="dpw-extra">
+                  {t.col.closed}
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.slice(0, LIST_LIMIT).map((i) => (
+                <tr key={i.id}>
+                  <th scope="row">{i.id}</th>
+                  <td className="dpw-name" title={`${i.title} — ${i.type}, ${i.state}, ${i.project}`}>
+                    <a href={i.url} target="_blank" rel="noopener noreferrer">
+                      {i.title}
+                    </a>
+                  </td>
+                  <td>{day(i.created)}</td>
+                  <td className="dpw-extra">{day(i.closed)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {items.length > LIST_LIMIT && <div className="dpw-sub">{t.shown(LIST_LIMIT, items.length)}</div>}
+      </Frame>
+    );
+  }
+
   const row = (r: ReportRow, label: string, total = false) => (
     <tr key={label} className={total ? "dpw-total" : undefined}>
       <th scope="row" title={label}>
         {label}
       </th>
-      <td>{r.openedClosed}</td>
-      <td>{r.stillOpen}</td>
-      <td>{r.closedOlder}</td>
-      <td className="dpw-extra">{formatDays(r.median, t.units, t.locale)}</td>
+      {FLOWS.map((f) => (
+        <td key={f}>
+          {r[f] > 0 ? (
+            <button className="dpw-count" title={t.w.showItems} onClick={() => setPick({ type: total ? undefined : r.type, flow: f })}>
+              {r[f]}
+            </button>
+          ) : (
+            0
+          )}
+        </td>
+      ))}
+      <td className="dpw-extra">{formatDays(r.avg, t.units, t.locale)}</td>
     </tr>
   );
   return (
@@ -70,8 +139,8 @@ function Summary({ settings }: { settings?: WidgetSettings }) {
               <th scope="col" title={t.w.closedOlderHint}>
                 {t.w.closedOlder}
               </th>
-              <th scope="col" className="dpw-extra" title={t.w.medianHint}>
-                {t.w.median}
+              <th scope="col" className="dpw-extra" title={t.w.avgHint}>
+                {t.w.avg}
               </th>
             </tr>
           </thead>
@@ -81,9 +150,10 @@ function Summary({ settings }: { settings?: WidgetSettings }) {
           </tbody>
         </table>
       </div>
-      {(data.truncated || data.warnings.length > 0) && (
+      {data.truncated && <div className="dpw-sub dpw-error">{t.w.truncated}</div>}
+      {data.warnings.length > 0 && (
         <div className="dpw-sub dpw-error" title={data.warnings.join("\n")}>
-          {t.w.truncated}
+          {t.warning(data.warnings[0])}
         </div>
       )}
     </Frame>

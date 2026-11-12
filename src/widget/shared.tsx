@@ -30,11 +30,12 @@ export interface SummarySettings {
   period: number | "custom";
   from: string;
   to: string;
-  related: boolean;
   /** Sayılacak kart tipleri; boşsa hepsi. */
   types: string[];
+  /** İptal durumundaki kartlar sayılmasın. */
+  noCancelled: boolean;
 }
-export const SUMMARY_DEFAULTS: SummarySettings = { period: 90, from: "", to: "", related: true, types: [] };
+export const SUMMARY_DEFAULTS: SummarySettings = { period: 90, from: "", to: "", types: [], noCancelled: false };
 
 /** Seçili kart tipleri. Eski sürümlerde ayar virgülle ayrılmış metindi; o da okunur. */
 export function selectedTypes(cfg: { types?: unknown }): string[] {
@@ -135,6 +136,9 @@ export function startConfig<T>(
   let current = defaults;
   let context: IWidgetConfigurationContext | undefined;
   const custom = () => ({ data: JSON.stringify(current) });
+
+  // Panelin kendi zemini görünsün: koyu temada iframe ayrı bir kutu gibi durmaz.
+  document.body.style.background = "transparent";
 
   function Host() {
     const ready = useEnv();

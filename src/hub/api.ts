@@ -21,6 +21,7 @@ import {
   RawWorkItem,
   ReportData,
   reportWiql,
+  splitRange,
   splitParents,
   toItems,
   toLinks,
@@ -32,13 +33,13 @@ import {
 
 // Server 2022 için 7.0.
 const API = "api-version=7.0";
-/** Tek yüklemede bu projeden okunan en fazla work item. */
-const ITEM_LIMIT = 2000;
-/** Tek yüklemede diğer projelerden okunan en fazla child. */
-const CHILD_LIMIT = 5000;
-/** Rapor widget'ında bu projeden ve alt kayıtlardan okunan en fazla work item (her biri için). */
-const REPORT_LIMIT = 10000;
-const LINK_LIMIT = 20000;
+/**
+ * Tek sorgunun döndürebildiği en fazla satır (sunucunun üst sınırı). Sorgu bu sayıya ulaşırsa tarih
+ * aralığı ikiye bölünüp yeniden sorulur; böylece geniş aralıklar da eksiksiz okunur.
+ */
+const QUERY_LIMIT = 20000;
+/** Tek yüklemede okunan en fazla work item (bu proje ve alt kayıtlar için ayrı ayrı); tarayıcıyı korur. */
+const TOTAL_LIMIT = 50000;
 /** En fazla bu kadar seviye inilir (child, child'ın child'ı, ...). */
 const MAX_DEPTH = 5;
 const BATCH = 200; // workitemsbatch tek istekte en fazla 200 id kabul eder
@@ -60,6 +61,7 @@ const FIELDS = [
 
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 type Links = { workItemRelations?: RawRelation[] };
+type Found = { workItems?: { id: number }[] };
 type Below = { ids: number[]; relatedTo: Map<number, { to: number; via: Via }>; truncated: boolean };
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -99,8 +101,26 @@ export function createRestSource(
     return (await res.json()) as T;
   }
 
-  const wiql = <T>(token: string, query: string, top: number) =>
-    call<T>(token, `_apis/wit/wiql?$top=${top}&${API}`, { query });
+  const wiql = <T>(token: string, query: string) => call<T>(token, `_apis/wit/wiql?$top=${QUERY_LIMIT}&${API}`, { query });
+
+  /**
+   * Sorguyu aralık için çalıştırır; sonuç sunucu sınırına ulaştıysa aralığı ikiye bölüp her yarıyı ayrıca sorar.
+   * Tek güne inildiği hâlde sınır doluyorsa `truncated` true döner.
+   */
+  async function windowed<T>(opts: LoadOptions, run: (o: LoadOptions) => Promise<T[]>): Promise<{ rows: T[]; truncated: boolean }> {
+    const rows = await run(opts);
+    if (rows.length < QUERY_LIMIT) return { rows, truncated: false };
+    const halves = splitRange(opts);
+    if (!halves) return { rows, truncated: true };
+    const parts = await Promise.all(halves.map((h) => windowed(h, run)));
+    return { rows: parts.flatMap((p) => p.rows), truncated: parts.some((p) => p.truncated) };
+  }
+
+  /** Aralıktaki kayıt id'leri (yinelenenler atılır). */
+  async function findIds(token: string, opts: LoadOptions, query: (o: LoadOptions) => string) {
+    const found = await windowed(opts, (o) => wiql<Found>(token, query(o)).then((r) => r.workItems ?? []));
+    return { ids: [...new Set(found.rows.map((w) => w.id))], truncated: found.truncated };
+  }
 
   const read = async (token: string, list: number[]) =>
     (
@@ -160,31 +180,31 @@ export function createRestSource(
     opts: LoadOptions,
     seen: Set<number>,
     match: DateMatch = "state",
-    limit = CHILD_LIMIT,
   ): Promise<Below> {
-    const query = (source: LinkSource, m: DateMatch) =>
-      wiql<Links>(token, childLinksWiql(opts, Date.now(), source, opts.related, m), LINK_LIMIT);
+    const query = (source: LinkSource, m: DateMatch, o: LoadOptions) =>
+      windowed(o, (w) =>
+        wiql<Links>(token, childLinksWiql(w, Date.now(), source, opts.related, m)).then((r) => r.workItemRelations ?? []),
+      );
     // "either" koşulunu sunucu kabul etmezse iki ayrı sorgu çalıştırılıp sonuçlar birleştirilir.
-    const run = (source: LinkSource): Promise<Links[]> =>
+    const run = (source: LinkSource) =>
       match !== "either"
-        ? query(source, match).then((r) => [r])
-        : query(source, "either").then(
+        ? query(source, match, opts).then((r) => [r])
+        : query(source, "either", opts).then(
             (r) => [r],
-            () => Promise.all([query(source, "created"), query(source, "state")]),
+            () => Promise.all([query(source, "created", opts), query(source, "state", opts)]),
           );
     const ids: number[] = [];
     const relatedTo = new Map<number, { to: number; via: Via }>();
     let truncated = false;
     let frontier: number[] = [];
-    for (let depth = 0; depth < MAX_DEPTH && ids.length <= limit; depth++) {
+    for (let depth = 0; depth < MAX_DEPTH && ids.length <= TOTAL_LIMIT; depth++) {
       if (depth > 0 && frontier.length === 0) break;
       const sources: LinkSource[] = depth === 0 ? [first] : chunk(frontier, BATCH).map((part) => ({ ids: part }));
       const found = (await mapLimit(sources, PARALLEL, run)).flat();
       frontier = [];
       for (const result of found) {
-        const relations = result.workItemRelations ?? [];
-        if (relations.length >= LINK_LIMIT) truncated = true;
-        for (const link of toLinks(relations, opts.related)) {
+        if (result.truncated) truncated = true;
+        for (const link of toLinks(result.rows, opts.related)) {
           if (seen.has(link.target)) continue;
           seen.add(link.target);
           frontier.push(link.target);
@@ -193,7 +213,7 @@ export function createRestSource(
       }
       ids.push(...frontier);
     }
-    return { ids, relatedTo, truncated: truncated || ids.length > limit };
+    return { ids, relatedTo, truncated: truncated || ids.length > TOTAL_LIMIT };
   }
 
   return {
@@ -211,14 +231,16 @@ export function createRestSource(
 
       const [found, links] = await Promise.all([
         // Bu projede aralıkta kapananlar.
-        wiql<{ workItems?: { id: number }[] }>(token, itemsWiql(states, opts, now, project), ITEM_LIMIT),
+        findIds(token, opts, (o) => itemsWiql(states, o, now, project)),
         // Onların child sayıları.
-        wiql<Links>(token, linksWiql(states, opts, now, project), LINK_LIMIT).catch(soft("links", undefined)),
+        windowed(opts, (o) =>
+          wiql<Links>(token, linksWiql(states, o, now, project)).then((r) => r.workItemRelations ?? []),
+        ).catch(soft("links", undefined)),
       ]);
 
-      const ids = (found.workItems ?? []).map((w) => w.id);
+      const ids = found.ids.slice(0, TOTAL_LIMIT);
       const raw = await read(token, ids);
-      const relations = links?.workItemRelations;
+      const relations = links?.rows;
       const counts = relations ? childCounts(relations) : undefined;
 
       // Bu projenin kayıtlarının altındaki, aralıkta durumu değişen kayıtlar (diğer projeler dahil).
@@ -226,7 +248,7 @@ export function createRestSource(
       const below = project ? await descend(token, { project }, opts, new Set(ids)).catch(soft("children", none)) : none;
 
       // Diğer projelerdeki child'lar kendi projelerinin kapalı durumlarına göre ayıklanır.
-      const rawChildren = await read(token, below.ids.slice(0, CHILD_LIMIT)).catch(soft("children", []));
+      const rawChildren = await read(token, below.ids.slice(0, TOTAL_LIMIT)).catch(soft("children", []));
       const childStates = await closedStatesFor(token, rawChildren, fallback);
       const closedChildren = rawChildren.filter((r): r is RawWorkItem => !!r && isClosedRaw(r, childStates));
       const all = [...raw, ...closedChildren];
@@ -245,7 +267,7 @@ export function createRestSource(
         project,
         // Gösterimde iptal bir kez yer alır.
         closedStates: states.filter((s) => !CANCELLED_STATES.slice(1).includes(s)),
-        truncated: ids.length >= ITEM_LIMIT || (relations?.length ?? 0) >= LINK_LIMIT || below.truncated,
+        truncated: found.truncated || found.ids.length > TOTAL_LIMIT || !!links?.truncated || below.truncated,
         warnings,
       };
     },
@@ -260,19 +282,19 @@ export function createRestSource(
       };
       const states = (project && (await projectStates(token, project))) || withCancelled(DEFAULT_CLOSED_STATES);
       const fallback = [...new Set([...states, ...DEFAULT_CLOSED_STATES])];
-      const found = await wiql<{ workItems?: { id: number }[] }>(token, reportWiql(opts, now, project), REPORT_LIMIT);
-      const ids = (found.workItems ?? []).map((w) => w.id);
+      const found = await findIds(token, opts, (o) => reportWiql(o, now, project));
+      const ids = found.ids.slice(0, TOTAL_LIMIT);
       const none: Below = { ids: [], relatedTo: new Map(), truncated: false };
       const [raw, below] = await Promise.all([
         read(token, ids),
         // Bu projenin kayıtlarının altındaki kayıtlar (diğer projeler dahil).
-        project ? descend(token, { project }, opts, new Set(ids), "either", REPORT_LIMIT).catch(soft("children", none)) : none,
+        project ? descend(token, { project }, opts, new Set(ids), "either").catch(soft("children", none)) : none,
       ]);
-      const rawChildren = await read(token, below.ids.slice(0, REPORT_LIMIT)).catch(soft("children", []));
+      const rawChildren = await read(token, below.ids.slice(0, TOTAL_LIMIT)).catch(soft("children", []));
       const all = [...raw, ...rawChildren].filter((r): r is RawWorkItem => !!r);
       return {
-        ...buildReport(all, await closedStatesFor(token, all, fallback), opts),
-        truncated: ids.length >= REPORT_LIMIT || below.truncated,
+        ...buildReport(all, await closedStatesFor(token, all, fallback), opts, base, below.relatedTo),
+        truncated: found.truncated || found.ids.length > TOTAL_LIMIT || below.truncated,
         warnings,
       };
     },

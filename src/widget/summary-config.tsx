@@ -23,14 +23,14 @@ function Types({ value, onChange, t, source }: FormProps) {
     let cancelled = false;
     setNames(undefined);
     setFailed(false);
-    source.loadReport({ ...range, related: value.related }).then(
+    source.loadReport({ ...range, related: true }).then(
       (d) => !cancelled && setNames(d.rows.map((r) => r.type).filter(Boolean)),
       () => !cancelled && setFailed(true),
     );
     return () => {
       cancelled = true;
     };
-  }, [source, range?.from, range?.to, value.related]);
+  }, [source, range?.from, range?.to]);
 
   const selected = selectedTypes(value);
   // Seçili ama bu aralıkta hiç görülmeyen tipler de listede kalır ki kaldırılabilsinler.
@@ -120,9 +120,9 @@ function Form(props: FormProps) {
         </div>
       )}
       <Types {...props} />
-      <label className="dpc-check" title={t.relatedHint}>
-        <input type="checkbox" checked={value.related} onChange={(e) => onChange({ ...value, related: e.target.checked })} />
-        {t.related}
+      <label className="dpc-check" title={t.noCancelledHint}>
+        <input type="checkbox" checked={!!value.noCancelled} onChange={(e) => onChange({ ...value, noCancelled: e.target.checked })} />
+        {t.noCancelled}
       </label>
     </div>
   );
